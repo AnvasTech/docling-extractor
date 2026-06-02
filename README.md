@@ -48,6 +48,7 @@ result. Tune via env:
 | `DOCLING_QUEUE_MAX` | `32` | max queued jobs (`503` when full) |
 | `DOCLING_EXTRACT_TIMEOUT` | `300` | seconds `/extract` waits before `504` |
 | `DOCLING_JOB_TTL` | `600` | seconds a finished job is retained for polling |
+| `DOCLING_OCR_LANGS` | `eng` | OCR languages, comma-separated. **Keep short** — Tesseract re-OCRs every page per language, so each one adds time. e.g. `eng,tam`. |
 | `DOCLING_MAX_BYTES` | `41943040` | max upload size (40 MB) |
 | `DOCLING_SERVICE_TOKEN` | — | bearer token; unset = no auth (local only) |
 

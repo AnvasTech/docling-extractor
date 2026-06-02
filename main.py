@@ -33,7 +33,14 @@ from docling.datamodel.pipeline_options import (
 from docling.document_converter import DocumentConverter, PdfFormatOption
 
 # --- config ----------------------------------------------------------------
-OCR_LANGS = ["eng", "tam", "tel", "kan", "mal", "hin", "mar", "ben", "guj"]
+# OCR languages — comma-separated. KEEP THIS SHORT: Tesseract re-OCRs every page
+# against every language, so more langs = much slower (painful on a CPU box).
+# Default English only; set e.g. DOCLING_OCR_LANGS="eng,tam" per deployment.
+OCR_LANGS = [
+    s.strip()
+    for s in os.environ.get("DOCLING_OCR_LANGS", "eng").split(",")
+    if s.strip()
+]
 SERVICE_TOKEN = os.environ.get("DOCLING_SERVICE_TOKEN", "")
 MAX_BYTES = int(os.environ.get("DOCLING_MAX_BYTES", str(40 * 1024 * 1024)))
 NUM_WORKERS = int(os.environ.get("DOCLING_WORKERS", "1"))
@@ -91,6 +98,8 @@ async def _worker() -> None:
             continue
         rec["status"] = "processing"
         rec["started_at"] = time.time()
+        name = rec.get("filename")
+        print(f"[extract] start {name} (langs={OCR_LANGS})", flush=True)
         try:
             rec["result"] = await loop.run_in_executor(
                 None, _convert_blocking, rec["data"], rec["suffix"]
@@ -100,6 +109,13 @@ async def _worker() -> None:
             rec["result"] = {"ok": False, "error": str(exc), "markdown": "", "pages": 0, "chars": 0}
             rec["status"] = "error"
         finally:
+            dt = time.time() - rec["started_at"]
+            r = rec.get("result") or {}
+            print(
+                f"[extract] done  {name} ok={r.get('ok')} pages={r.get('pages')} "
+                f"chars={r.get('chars')} in {dt:.1f}s",
+                flush=True,
+            )
             rec["finished_at"] = time.time()
             rec.pop("data", None)
             rec["event"].set()
