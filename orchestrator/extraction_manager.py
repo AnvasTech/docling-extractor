@@ -51,7 +51,6 @@ def extract(
     log(logger, logging.INFO, "plan", file=file_name, cascade=plan.cascade, rationale=plan.rationale)
 
     rag = mode is ExtractionMode.RAG
-    needs_layout = quality_analyzer.needs_layout_engine(analysis)
 
     chain: list[str] = []
     best: ExtractorOutput | None = None
@@ -77,9 +76,12 @@ def extract(
             best, best_conf = out, conf
             break
 
-        accept_text = not quality_analyzer.should_escalate_extraction(conf)
-        accept_layout = (not needs_layout) or out.layout_confidence >= 0.85
-        if accept_text and accept_layout:
+        # Accept as soon as the text is good enough. Title-verification analysis
+        # runs on the text — escalating a perfectly-extracted digital PDF to a
+        # 100x-slower OCR/layout engine just for structure is not worth it. We
+        # only escalate when the text itself is thin (genuine scans). Explicit
+        # engine=docling (e.g. FMB/A-register routing) still forces layout.
+        if not quality_analyzer.should_escalate_extraction(conf):
             break
 
     if best is None:
