@@ -3,7 +3,8 @@
 Shared document-to-text microservice. Tiered extraction, cheapest-first:
 
 1. **PyMuPDF** — primary. Pulls the embedded text layer of digital PDFs. Instant.
-2. **PaddleOCR** — fallback OCR for scanned pages (renders + OCRs each page).
+2. **RapidOCR** — fallback OCR for scanned pages. Runs the PP-OCR (PaddleOCR)
+   models via ONNX Runtime — same model quality, no fragile `paddlepaddle`.
 3. **Docling** — complex layouts (tables, multi-column) when explicitly asked.
 
 Downstream, the calling app runs the AI analysis (Claude / GPT) on the text.
@@ -23,9 +24,10 @@ Auth: if `DOCLING_SERVICE_TOKEN` is set, send `Authorization: Bearer <token>`.
 | POST   | `/jobs`      | multipart `file=@doc.pdf` `engine=`    | `{ job_id, status }` immediately |
 | GET    | `/jobs/{id}` | —                                      | `{ status, result }` |
 
-**`engine`** (optional form field): `auto` (default — PyMuPDF, then PaddleOCR if
-the text layer is thin), `pymupdf` (text layer only), `paddle` (force OCR),
-`docling` (complex layouts). The result's `method` reports which actually ran.
+**`engine`** (optional form field): `auto` (default — PyMuPDF, then RapidOCR if
+the text layer is thin), `pymupdf` (text layer only), `ocr` (force OCR;
+`paddle` accepted as an alias), `docling` (complex layouts). The result's
+`method` reports which actually ran.
 
 ```bash
 # auto: instant for digital PDFs, OCR fallback for scans
@@ -47,7 +49,6 @@ poll. Env:
 | Env | Default | Meaning |
 |-----|---------|---------|
 | `DOCLING_DEFAULT_ENGINE` | `auto` | engine when the request omits one |
-| `PADDLE_LANG` | `en` | PaddleOCR language (one): `en`, `ch`, `ta`, `te`, `ka`, `devanagari`, … |
 | `DOCLING_OCR_DPI` | `200` | page render DPI for OCR (higher = better + slower) |
 | `DOCLING_WORKERS` | `1` | parallel conversions (raise only with more RAM) |
 | `DOCLING_QUEUE_MAX` | `32` | max queued jobs (`503` when full) |
@@ -63,7 +64,7 @@ poll. Env:
 
 - **Digital PDFs** (most registrar-portal ECs/deeds have a text layer) → PyMuPDF,
   seconds regardless of page count.
-- **Scanned PDFs/images** → PaddleOCR per page (~1-3 s/page on CPU).
+- **Scanned PDFs/images** → RapidOCR per page (~1-3 s/page on CPU).
 - **Complex tables/layout** → `engine=docling` (slowest, best structure).
 
 ## Deploy (Docker, e.g. Hetzner)
@@ -74,7 +75,7 @@ curl -s localhost:8000/health
 ```
 Behind a TLS reverse proxy (nginx/Caddy), raise `client_max_body_size` to 40 MB.
 
-> **Image is heavy** — PyTorch (Docling) + PaddlePaddle + models. Give the box
+> **Image is heavy** — PyTorch (Docling) + ONNX OCR + models. Give the box
 > ≥ 4 GB RAM and a few GB free disk. Engines lazy-load, so only the one in use
 > occupies memory at runtime.
 

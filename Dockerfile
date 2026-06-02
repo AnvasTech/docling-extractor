@@ -2,7 +2,8 @@ FROM python:3.12-slim
 
 # System deps:
 #  - tesseract (Docling's OCR backend for the complex-layout path)
-#  - poppler (PDF utils), libGL/glib (OpenCV, used by PaddleOCR), libgomp (Paddle)
+#  - poppler (PDF utils), libGL/glib (OpenCV, used by RapidOCR)
+#  - libgomp (ONNX Runtime)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tesseract-ocr \
     tesseract-ocr-eng \
@@ -21,11 +22,9 @@ RUN pip install --no-cache-dir \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Bake models into the image so the container needs no runtime download:
-#  - Docling layout/table models
-#  - PaddleOCR det/rec/cls models (PP-OCRv4)
+# Bake Docling layout/table models into the image (no runtime download).
+# RapidOCR ships its PP-OCR ONNX models inside the wheel — nothing to download.
 RUN docling-tools models download
-RUN python -c "from paddleocr import PaddleOCR; PaddleOCR(use_angle_cls=True, lang='en', show_log=False)"
 
 COPY . .
 

@@ -10,11 +10,9 @@ services:
       # Shared secret — must match DOCLING_SERVICE_TOKEN in each caller app's env.
       DOCLING_SERVICE_TOKEN: ${DOCLING_SERVICE_TOKEN:-}
       DOCLING_MAX_BYTES: ${DOCLING_MAX_BYTES:-41943040}
-      # Default engine: auto (PyMuPDF text → PaddleOCR if scanned) | pymupdf |
-      # paddle | docling.
+      # Default engine: auto (PyMuPDF text → RapidOCR if scanned) | pymupdf |
+      # ocr | docling.
       DOCLING_DEFAULT_ENGINE: ${DOCLING_DEFAULT_ENGINE:-auto}
-      # PaddleOCR language (en, ch, ta, te, ka, devanagari, ...). One only.
-      PADDLE_LANG: ${PADDLE_LANG:-en}
       DOCLING_OCR_DPI: ${DOCLING_OCR_DPI:-200}
       # Concurrency. Keep 1 on a small/CPU box; raise only with more RAM.
       DOCLING_WORKERS: ${DOCLING_WORKERS:-1}

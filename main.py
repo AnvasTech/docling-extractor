@@ -2,19 +2,21 @@
 Document extraction microservice (shared infra).
 
 Tiered extraction, cheapest-first:
-  1. PyMuPDF   — primary. Pulls the embedded text layer (digital PDFs). Instant.
-  2. PaddleOCR — fallback OCR for scanned pages (renders pages, OCRs them).
-  3. Docling   — complex layouts (tables, multi-column) when explicitly asked.
+  1. PyMuPDF  — primary. Pulls the embedded text layer of digital PDFs. Instant.
+  2. RapidOCR — fallback OCR for scanned pages. Runs the PP-OCR (PaddleOCR)
+                models via ONNX Runtime: same model quality, no paddlepaddle
+                (which segfaults on constrained CPU boxes), lighter, reliable.
+  3. Docling  — complex layouts (tables, multi-column) when explicitly asked.
 Downstream, the calling app runs the AI analysis (Claude / GPT) on the text.
 
-Engine is chosen per request via the `engine` field:
-  auto (default) → PyMuPDF; if the text layer is thin (scanned), PaddleOCR.
-  paddle         → force PaddleOCR.
+Engine per request via the `engine` field:
+  auto (default) → PyMuPDF; if the text layer is thin (scanned), OCR.
+  pymupdf        → text layer only.
+  ocr | paddle   → force OCR (RapidOCR / PP-OCR models).
   docling        → force Docling (complex layouts).
-  pymupdf        → text layer only, no OCR.
 
-Sync POST /extract (waits) and async POST /jobs + GET /jobs/{id} (submit+poll)
-both feed one in-process queue so concurrent callers don't thrash a CPU box.
+Sync POST /extract (waits) and async POST /jobs + GET /jobs/{id} both feed one
+in-process queue so concurrent callers don't thrash a CPU box.
 """
 
 import asyncio
@@ -34,26 +36,22 @@ QUEUE_MAX = int(os.environ.get("DOCLING_QUEUE_MAX", "32"))
 JOB_TTL = int(os.environ.get("DOCLING_JOB_TTL", "1800"))
 EXTRACT_TIMEOUT = int(os.environ.get("DOCLING_EXTRACT_TIMEOUT", "600"))
 DEFAULT_ENGINE = os.environ.get("DOCLING_DEFAULT_ENGINE", "auto")
-# OCR language for PaddleOCR (en, ch, ta, te, ka, devanagari, ...). One only.
-PADDLE_LANG = os.environ.get("PADDLE_LANG", "en")
 OCR_DPI = int(os.environ.get("DOCLING_OCR_DPI", "200"))
 # Min chars (per page) for PyMuPDF text to count as a real text layer.
 TEXT_MIN_PER_PAGE = int(os.environ.get("DOCLING_TEXT_MIN_PER_PAGE", "50"))
 
-IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tif", ".tiff"}
-
 # --- lazy engine singletons (load only what's used; saves RAM) --------------
-_paddle = None
+_ocr = None
 _docling = None
 
 
-def get_paddle():
-    global _paddle
-    if _paddle is None:
-        from paddleocr import PaddleOCR
+def get_ocr():
+    global _ocr
+    if _ocr is None:
+        from rapidocr_onnxruntime import RapidOCR
 
-        _paddle = PaddleOCR(use_angle_cls=True, lang=PADDLE_LANG, show_log=False)
-    return _paddle
+        _ocr = RapidOCR()
+    return _ocr
 
 
 def get_docling():
@@ -79,7 +77,6 @@ def get_docling():
 
 # --- extractors ------------------------------------------------------------
 def _pymupdf_text(path: str) -> tuple[str, int]:
-    """Embedded text layer + page count (text may be empty for scans)."""
     import fitz  # PyMuPDF
 
     doc = fitz.open(path)
@@ -91,11 +88,18 @@ def _pymupdf_text(path: str) -> tuple[str, int]:
         doc.close()
 
 
-def _paddle_pdf(path: str) -> tuple[str, int]:
-    """Render each page and OCR it with PaddleOCR."""
+def _ocr_image(path: str) -> str:
+    engine = get_ocr()
+    result, _elapse = engine(path)
+    if not result:
+        return ""
+    # result rows: [box, text, score]
+    return "\n".join(row[1] for row in result if len(row) >= 2 and row[1])
+
+
+def _ocr_pdf(path: str) -> tuple[str, int]:
     import fitz
 
-    ocr = get_paddle()
     doc = fitz.open(path)
     out: list[str] = []
     try:
@@ -104,24 +108,10 @@ def _paddle_pdf(path: str) -> tuple[str, int]:
             pix = doc.load_page(i).get_pixmap(dpi=OCR_DPI)
             with tempfile.NamedTemporaryFile(suffix=".png", delete=True) as img:
                 pix.save(img.name)
-                out.append(_paddle_image(img.name))
+                out.append(_ocr_image(img.name))
         return "\n\n".join(p for p in out if p).strip(), pages
     finally:
         doc.close()
-
-
-def _paddle_image(path: str) -> str:
-    ocr = get_paddle()
-    result = ocr.ocr(path, cls=True)
-    lines: list[str] = []
-    for page in result or []:
-        for entry in page or []:
-            # entry = [box, (text, confidence)]
-            try:
-                lines.append(entry[1][0])
-            except (IndexError, TypeError):
-                continue
-    return "\n".join(lines)
 
 
 def _docling_convert(path: str) -> tuple[str, int]:
@@ -135,7 +125,7 @@ def _docling_convert(path: str) -> tuple[str, int]:
 
 
 def _extract(data: bytes, suffix: str, engine: str) -> dict:
-    """Runs in a thread (CPU-bound). Returns the result dict."""
+    """Runs in a thread (CPU-bound)."""
     suffix = suffix.lower() or ".pdf"
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=True) as tmp:
         tmp.write(data)
@@ -151,15 +141,15 @@ def _extract(data: bytes, suffix: str, engine: str) -> dict:
                 method = "pymupdf"
                 thin = len(text) < max(200, pages * TEXT_MIN_PER_PAGE)
                 if thin and engine == "auto":
-                    text, pages = _paddle_pdf(path)  # scanned → OCR
-                    method = "paddle"
-            elif is_pdf and engine == "paddle":
-                text, pages = _paddle_pdf(path)
-                method = "paddle"
+                    text, pages = _ocr_pdf(path)  # scanned → OCR
+                    method = "ocr"
+            elif is_pdf and engine == "ocr":
+                text, pages = _ocr_pdf(path)
+                method = "ocr"
             else:  # image input
-                text = _paddle_image(path) if engine != "docling" else _docling_convert(path)[0]
+                text = _docling_convert(path)[0] if engine == "docling" else _ocr_image(path)
                 pages = 1
-                method = "paddle"
+                method = "docling" if engine == "docling" else "ocr"
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": str(exc), "markdown": "", "pages": 0, "chars": 0}
 
@@ -234,7 +224,9 @@ def _check_auth(authorization: str | None) -> None:
 
 def _norm_engine(engine: str | None) -> str:
     e = (engine or DEFAULT_ENGINE).lower()
-    return e if e in ("auto", "pymupdf", "paddle", "docling") else "auto"
+    if e == "paddle":
+        e = "ocr"  # accept the old keyword
+    return e if e in ("auto", "pymupdf", "ocr", "docling") else "auto"
 
 
 def _enqueue(data: bytes, filename: str | None, engine: str) -> str:
@@ -266,9 +258,8 @@ def health() -> dict:
     return {
         "ok": True,
         "service": "document-extractor",
-        "engines": ["pymupdf", "paddle", "docling"],
+        "engines": ["pymupdf", "ocr", "docling"],
         "default_engine": DEFAULT_ENGINE,
-        "paddle_lang": PADDLE_LANG,
         "workers": NUM_WORKERS,
         "queue_depth": _queue.qsize(),
         "queue_max": QUEUE_MAX,
