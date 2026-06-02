@@ -1,0 +1,4 @@
+# Optional — only needed for mode=rag (OpenDataLoader-PDF path).
+# Installed best-effort in the Dockerfile; if absent, the RAG path falls back
+# to Docling automatically (OpenDataLoaderExtractor.available() -> False).
+opendataloader-pdf

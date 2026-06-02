@@ -19,8 +19,12 @@ WORKDIR /app
 RUN pip install --no-cache-dir \
     torch torchvision --index-url https://download.pytorch.org/whl/cpu
 
-COPY requirements.txt .
+COPY requirements.txt requirements-rag.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
+# OpenDataLoader-PDF is optional (mode=rag only). Best-effort — if it can't
+# install, the RAG path falls back to Docling at runtime.
+RUN pip install --no-cache-dir -r requirements-rag.txt || \
+    echo "opendataloader-pdf optional: skipped"
 
 # Bake Docling layout/table models into the image (no runtime download).
 # RapidOCR ships its PP-OCR ONNX models inside the wheel — nothing to download.

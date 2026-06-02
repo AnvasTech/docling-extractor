@@ -1,87 +1,84 @@
 # docling-extractor
 
-Shared document-to-text microservice. Tiered extraction, cheapest-first:
+Stateless **Intelligent PDF Extraction & OCR Orchestrator** for the Indian
+Property Title Verification platform. It analyses each document, picks the
+cheapest engine that can hit acceptable quality, escalates only when needed, and
+returns one normalized JSON — the caller never knows which engine ran.
 
-1. **PyMuPDF** — primary. Pulls the embedded text layer of digital PDFs. Instant.
-2. **RapidOCR** — fallback OCR for scanned pages. Runs the PP-OCR (PaddleOCR)
-   models via ONNX Runtime — same model quality, no fragile `paddlepaddle`.
-3. **Docling** — complex layouts (tables, multi-column) when explicitly asked.
+Engines: **PyMuPDF** (text layer) · **RapidOCR** (scanned) · **Docling**
+(complex layout/tables) · **OpenDataLoader-PDF** (RAG, optional).
 
-Downstream, the calling app runs the AI analysis (Claude / GPT) on the text.
-
-**Generic, no app logic.** Any app POSTs a file and gets text back:
-- land-title verification → legal title prompt
-- trading research → company / components / info prompt
+> **Stateless by design.** No DB, no cache, no persisted documents/text/metadata,
+> no shared filesystem. Temp files are deleted after every request. Supabase
+> (the web app) is the source of truth and the only cache. Run N replicas with
+> zero coordination. See [MIGRATION.md](./MIGRATION.md) for architecture.
 
 ## API
 
 Auth: if `DOCLING_SERVICE_TOKEN` is set, send `Authorization: Bearer <token>`.
 
-| Method | Path         | Body                                   | Returns |
-|--------|--------------|----------------------------------------|---------|
-| GET    | `/health`    | —                                      | engines + queue stats |
-| POST   | `/extract`   | multipart `file=@doc.pdf` `engine=`    | waits → `{ ok, method, pages, chars, markdown }` |
-| POST   | `/jobs`      | multipart `file=@doc.pdf` `engine=`    | `{ job_id, status }` immediately |
-| GET    | `/jobs/{id}` | —                                      | `{ status, result }` |
+### Stateless flow (recommended)
+```
+POST /extract     {"file_url": "<signed supabase url>", "mode": "auto|fast|legal|rag",
+                   "document_id": "...", "document_type": "..."}
+                  → unified ExtractionResult JSON
+```
+Server downloads the signed URL, extracts, returns JSON, deletes the temp file.
+`/extract` also accepts a multipart `file` (legacy direct upload).
 
-**`engine`** (optional form field): `auto` (default — PyMuPDF, then RapidOCR if
-the text layer is thin), `pymupdf` (text layer only), `ocr` (force OCR;
-`paddle` accepted as an alias), `docling` (complex layouts). The result's
-`method` reports which actually ran.
-
-```bash
-# auto: instant for digital PDFs, OCR fallback for scans
-curl -s -H "Authorization: Bearer $TOKEN" -F "file=@ec.pdf" \
-  https://docling.example.com/extract | jq '{method, pages, chars}'
-
-# async + poll for big scans
-JOB=$(curl -s -H "Authorization: Bearer $TOKEN" -F "file=@deed.pdf" -F "engine=paddle" \
-  https://docling.example.com/jobs | jq -r .job_id)
-curl -s -H "Authorization: Bearer $TOKEN" https://docling.example.com/jobs/$JOB | jq .status
+### Async queue (backward-compatible — used by the Title app today)
+```
+POST /jobs        multipart file=@doc.pdf  engine=auto|pymupdf|ocr|docling
+                  → {job_id, status}
+GET  /jobs/{id}   → {status, result}   # result has ok/markdown/method/pages/chars + unified fields
+GET  /health      → engines, modes, queue
+GET  /metrics     → request counts, avg latency, by-method
 ```
 
-## Queue
+## Modes
+| Mode | Pipeline | Use |
+|------|----------|-----|
+| `auto` | class-driven | default; digital→PyMuPDF, scanned→RapidOCR, tables/layout→Docling |
+| `fast` | PyMuPDF → RapidOCR | bulk ingestion / indexing |
+| `legal` | PyMuPDF → RapidOCR → Docling | title verification (reading order + tables matter) |
+| `rag` | OpenDataLoader-PDF → Docling | RAG-ready markdown + chunks (only on request) |
 
-Both `/extract` and `/jobs` feed one in-process queue so concurrent callers
-don't thrash a CPU box. `/extract` waits on the result; `/jobs` returns an id to
-poll. Env:
+Escalation is confidence-gated: an engine's output is scored (text/OCR/layout
+confidence); below threshold the orchestrator escalates to the next engine.
 
-| Env | Default | Meaning |
-|-----|---------|---------|
-| `DOCLING_DEFAULT_ENGINE` | `auto` | engine when the request omits one |
-| `DOCLING_OCR_DPI` | `200` | page render DPI for OCR (higher = better + slower) |
-| `DOCLING_WORKERS` | `1` | parallel conversions (raise only with more RAM) |
-| `DOCLING_QUEUE_MAX` | `32` | max queued jobs (`503` when full) |
-| `DOCLING_EXTRACT_TIMEOUT` | `600` | seconds `/extract` waits before `504` |
-| `DOCLING_JOB_TTL` | `1800` | seconds a finished job is retained for polling |
-| `DOCLING_MAX_BYTES` | `41943040` | max upload size (40 MB) |
-| `DOCLING_SERVICE_TOKEN` | — | bearer token; unset = no auth (local only) |
+## Unified output (excerpt)
+```json
+{
+  "document_id": "", "file_name": "", "document_type": "", "page_count": 0,
+  "primary_language": "en", "secondary_languages": [], "mixed_language": false,
+  "page_languages": {}, "ocr_required": false,
+  "extraction_method": "pymupdf", "extraction_chain": ["pymupdf"],
+  "confidence_score": 0.0, "ocr_confidence": 0.0, "layout_confidence": 0.0,
+  "language_confidence": 0.0, "processing_time_ms": 0,
+  "text": "", "pages": [], "tables": [], "metadata": {},
+  "ok": true, "markdown": "", "method": "pymupdf", "chars": 0
+}
+```
+`ok`/`markdown`/`method`/`chars` are backward-compat mirrors for the existing app.
 
-> Queue + job store are **in-process** — single uvicorn worker. State is lost on
-> restart; for durable cross-process queuing, swap in Redis/RQ.
+## Layout
+```
+api/  orchestrator/  analyzers/  extractors/  schemas/  services/  integrations/  core/  tests/
+```
+See [MIGRATION.md](./MIGRATION.md) for the module map, flow, and migration plan.
 
-## Speed
+## Config (env)
+`DOCLING_SERVICE_TOKEN`, `DOCLING_DEFAULT_MODE` (auto), `DOCLING_WORKERS` (1),
+`DOCLING_OCR_DPI` (200), `DOCLING_EXTRACT_THRESHOLD` (0.90),
+`DOCLING_LAYOUT_THRESHOLD` (0.60), `DOCLING_MAX_BYTES` (200 MB),
+`DOCLING_JOB_TTL` (1800), `LOG_LEVEL` (INFO).
 
-- **Digital PDFs** (most registrar-portal ECs/deeds have a text layer) → PyMuPDF,
-  seconds regardless of page count.
-- **Scanned PDFs/images** → RapidOCR per page (~1-3 s/page on CPU).
-- **Complex tables/layout** → `engine=docling` (slowest, best structure).
-
-## Deploy (Docker, e.g. Hetzner)
+## Run / deploy
 ```bash
-export DOCLING_SERVICE_TOKEN="$(openssl rand -hex 32)"   # save it
-docker compose up -d --build                              # models baked at build
+docker compose up -d --build      # behind nginx + TLS
 curl -s localhost:8000/health
+python3 -m pytest -q tests        # pure-logic tests (no engines needed)
 ```
-Behind a TLS reverse proxy (nginx/Caddy), raise `client_max_body_size` to 40 MB.
-
-> **Image is heavy** — PyTorch (Docling) + ONNX OCR + models. Give the box
-> ≥ 4 GB RAM and a few GB free disk. Engines lazy-load, so only the one in use
-> occupies memory at runtime.
-
-## Callers
-```
-DOCLING_SERVICE_URL=https://docling.example.com
-DOCLING_SERVICE_TOKEN=<same token>
-```
-POST to `/extract` (small/sync) or `/jobs` (big/async), optionally with `engine`.
+Heavy image (PyTorch for Docling + ONNX OCR + models, ≥4 GB RAM). Engines
+lazy-load, so only the one in use occupies memory. RAG deps are optional
+(`requirements-rag.txt`, best-effort in the Dockerfile).
