@@ -1,19 +1,20 @@
 """
-Docling extraction microservice (shared infra).
+Document extraction microservice (shared infra).
 
-Generic OCR / document-to-text service. Converts a PDF or image (incl. scanned
-and multilingual) to structured Markdown + page count. No app-specific logic —
-any app (land-title verification, trading research, ...) POSTs a file and gets
-text back, then runs its own LLM analysis downstream.
+Tiered extraction, cheapest-first:
+  1. PyMuPDF   — primary. Pulls the embedded text layer (digital PDFs). Instant.
+  2. PaddleOCR — fallback OCR for scanned pages (renders pages, OCRs them).
+  3. Docling   — complex layouts (tables, multi-column) when explicitly asked.
+Downstream, the calling app runs the AI analysis (Claude / GPT) on the text.
 
-Two ways to call it:
-  - POST /extract        synchronous: enqueue + wait for the result.
-  - POST /jobs           async: enqueue, returns a job_id immediately.
-    GET  /jobs/{job_id}  poll status / fetch the result.
+Engine is chosen per request via the `engine` field:
+  auto (default) → PyMuPDF; if the text layer is thin (scanned), PaddleOCR.
+  paddle         → force PaddleOCR.
+  docling        → force Docling (complex layouts).
+  pymupdf        → text layer only, no OCR.
 
-Extraction is serialised through an in-process queue with a bounded number of
-workers (DOCLING_WORKERS, default 1) so concurrent callers don't thrash a
-CPU-only box — requests queue instead of competing.
+Sync POST /extract (waits) and async POST /jobs + GET /jobs/{id} (submit+poll)
+both feed one in-process queue so concurrent callers don't thrash a CPU box.
 """
 
 import asyncio
@@ -23,105 +24,152 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, File, Header, HTTPException, UploadFile
-
-from pypdf import PdfReader
-
-from docling.datamodel.base_models import InputFormat
-from docling.datamodel.pipeline_options import (
-    PdfPipelineOptions,
-    TesseractCliOcrOptions,
-)
-from docling.document_converter import DocumentConverter, PdfFormatOption
+from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 
 # --- config ----------------------------------------------------------------
-# OCR languages — comma-separated. KEEP THIS SHORT: Tesseract re-OCRs every page
-# against every language, so more langs = much slower (painful on a CPU box).
-# Default English only; set e.g. DOCLING_OCR_LANGS="eng,tam" per deployment.
-OCR_LANGS = [
-    s.strip()
-    for s in os.environ.get("DOCLING_OCR_LANGS", "eng").split(",")
-    if s.strip()
-]
 SERVICE_TOKEN = os.environ.get("DOCLING_SERVICE_TOKEN", "")
 MAX_BYTES = int(os.environ.get("DOCLING_MAX_BYTES", str(40 * 1024 * 1024)))
 NUM_WORKERS = int(os.environ.get("DOCLING_WORKERS", "1"))
-# Fast path: if a PDF already has a real text layer (most registrar-portal ECs
-# and deeds are digital), read it directly with pypdf instead of OCR'ing every
-# page — seconds vs. minutes. Only genuinely scanned PDFs fall through to OCR.
-# Set DOCLING_FORCE_OCR=1 to always OCR.
-FORCE_OCR = os.environ.get("DOCLING_FORCE_OCR", "0") == "1"
 QUEUE_MAX = int(os.environ.get("DOCLING_QUEUE_MAX", "32"))
-JOB_TTL = int(os.environ.get("DOCLING_JOB_TTL", "600"))  # keep finished jobs (s)
-EXTRACT_TIMEOUT = int(os.environ.get("DOCLING_EXTRACT_TIMEOUT", "300"))  # /extract wait (s)
+JOB_TTL = int(os.environ.get("DOCLING_JOB_TTL", "1800"))
+EXTRACT_TIMEOUT = int(os.environ.get("DOCLING_EXTRACT_TIMEOUT", "600"))
+DEFAULT_ENGINE = os.environ.get("DOCLING_DEFAULT_ENGINE", "auto")
+# OCR language for PaddleOCR (en, ch, ta, te, ka, devanagari, ...). One only.
+PADDLE_LANG = os.environ.get("PADDLE_LANG", "en")
+OCR_DPI = int(os.environ.get("DOCLING_OCR_DPI", "200"))
+# Min chars (per page) for PyMuPDF text to count as a real text layer.
+TEXT_MIN_PER_PAGE = int(os.environ.get("DOCLING_TEXT_MIN_PER_PAGE", "50"))
+
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tif", ".tiff"}
+
+# --- lazy engine singletons (load only what's used; saves RAM) --------------
+_paddle = None
+_docling = None
 
 
-def _build_converter() -> DocumentConverter:
-    ocr_options = TesseractCliOcrOptions(lang=OCR_LANGS)
-    pipeline = PdfPipelineOptions(
-        do_ocr=True,
-        do_table_structure=True,
-        ocr_options=ocr_options,
-    )
-    return DocumentConverter(
-        format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline)}
-    )
+def get_paddle():
+    global _paddle
+    if _paddle is None:
+        from paddleocr import PaddleOCR
+
+        _paddle = PaddleOCR(use_angle_cls=True, lang=PADDLE_LANG, show_log=False)
+    return _paddle
 
 
-CONVERTER = _build_converter()
+def get_docling():
+    global _docling
+    if _docling is None:
+        from docling.datamodel.base_models import InputFormat
+        from docling.datamodel.pipeline_options import (
+            PdfPipelineOptions,
+            TesseractCliOcrOptions,
+        )
+        from docling.document_converter import DocumentConverter, PdfFormatOption
 
-# --- in-process job queue --------------------------------------------------
-# Each job: { status, data, suffix, filename, result, event, created_at, ... }
-# The data bytes are dropped once processed to free memory.
-_jobs: dict[str, dict] = {}
-_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=QUEUE_MAX)
+        pipeline = PdfPipelineOptions(
+            do_ocr=True,
+            do_table_structure=True,
+            ocr_options=TesseractCliOcrOptions(lang=["eng"]),
+        )
+        _docling = DocumentConverter(
+            format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline)}
+        )
+    return _docling
 
 
-def _quick_pdf_text(path: str) -> tuple[str, int] | None:
-    """Return (text, pages) if the PDF has a usable embedded text layer, else None."""
+# --- extractors ------------------------------------------------------------
+def _pymupdf_text(path: str) -> tuple[str, int]:
+    """Embedded text layer + page count (text may be empty for scans)."""
+    import fitz  # PyMuPDF
+
+    doc = fitz.open(path)
     try:
-        reader = PdfReader(path)
-        n_pages = len(reader.pages) or 1
-        parts = [(p.extract_text() or "") for p in reader.pages]
-        text = "\n\n".join(parts).strip()
-        # Heuristic: enough text per page means it's a real text layer, not a scan.
-        if len(text) >= max(200, n_pages * 50):
-            return text, n_pages
-    except Exception:  # noqa: BLE001
-        return None
-    return None
+        pages = doc.page_count or 1
+        parts = [doc.load_page(i).get_text() for i in range(doc.page_count)]
+        return "\n\n".join(parts).strip(), pages
+    finally:
+        doc.close()
 
 
-def _convert_blocking(data: bytes, suffix: str) -> dict:
-    """Runs in a thread (Docling is blocking/CPU-bound)."""
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=True) as tmp:
-        tmp.write(data)
-        tmp.flush()
+def _paddle_pdf(path: str) -> tuple[str, int]:
+    """Render each page and OCR it with PaddleOCR."""
+    import fitz
 
-        # Fast path: digital PDF with a text layer → skip OCR entirely.
-        if suffix.lower() == ".pdf" and not FORCE_OCR:
-            quick = _quick_pdf_text(tmp.name)
-            if quick is not None:
-                text, pages = quick
-                return {
-                    "ok": True,
-                    "pages": pages,
-                    "chars": len(text),
-                    "markdown": text,
-                    "method": "text-layer",
-                }
+    ocr = get_paddle()
+    doc = fitz.open(path)
+    out: list[str] = []
+    try:
+        pages = doc.page_count or 1
+        for i in range(doc.page_count):
+            pix = doc.load_page(i).get_pixmap(dpi=OCR_DPI)
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=True) as img:
+                pix.save(img.name)
+                out.append(_paddle_image(img.name))
+        return "\n\n".join(p for p in out if p).strip(), pages
+    finally:
+        doc.close()
 
-        try:
-            result = CONVERTER.convert(tmp.name)
-        except Exception as exc:  # noqa: BLE001
-            return {"ok": False, "error": str(exc), "markdown": "", "pages": 0, "chars": 0}
+
+def _paddle_image(path: str) -> str:
+    ocr = get_paddle()
+    result = ocr.ocr(path, cls=True)
+    lines: list[str] = []
+    for page in result or []:
+        for entry in page or []:
+            # entry = [box, (text, confidence)]
+            try:
+                lines.append(entry[1][0])
+            except (IndexError, TypeError):
+                continue
+    return "\n".join(lines)
+
+
+def _docling_convert(path: str) -> tuple[str, int]:
+    result = get_docling().convert(path)
     doc = result.document
-    markdown = doc.export_to_markdown()
     try:
         pages = len(doc.pages)
     except Exception:  # noqa: BLE001
         pages = 0
-    return {"ok": True, "pages": pages, "chars": len(markdown), "markdown": markdown, "method": "ocr"}
+    return doc.export_to_markdown(), pages
+
+
+def _extract(data: bytes, suffix: str, engine: str) -> dict:
+    """Runs in a thread (CPU-bound). Returns the result dict."""
+    suffix = suffix.lower() or ".pdf"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=True) as tmp:
+        tmp.write(data)
+        tmp.flush()
+        path = tmp.name
+        try:
+            is_pdf = suffix == ".pdf"
+            if engine == "docling":
+                text, pages = _docling_convert(path)
+                method = "docling"
+            elif is_pdf and engine in ("auto", "pymupdf"):
+                text, pages = _pymupdf_text(path)
+                method = "pymupdf"
+                thin = len(text) < max(200, pages * TEXT_MIN_PER_PAGE)
+                if thin and engine == "auto":
+                    text, pages = _paddle_pdf(path)  # scanned → OCR
+                    method = "paddle"
+            elif is_pdf and engine == "paddle":
+                text, pages = _paddle_pdf(path)
+                method = "paddle"
+            else:  # image input
+                text = _paddle_image(path) if engine != "docling" else _docling_convert(path)[0]
+                pages = 1
+                method = "paddle"
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc), "markdown": "", "pages": 0, "chars": 0}
+
+    text = (text or "").strip()
+    return {"ok": True, "pages": pages, "chars": len(text), "markdown": text, "method": method}
+
+
+# --- in-process job queue --------------------------------------------------
+_jobs: dict[str, dict] = {}
+_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=QUEUE_MAX)
 
 
 async def _worker() -> None:
@@ -135,10 +183,10 @@ async def _worker() -> None:
         rec["status"] = "processing"
         rec["started_at"] = time.time()
         name = rec.get("filename")
-        print(f"[extract] start {name} (langs={OCR_LANGS})", flush=True)
+        print(f"[extract] start {name} engine={rec['engine']}", flush=True)
         try:
             rec["result"] = await loop.run_in_executor(
-                None, _convert_blocking, rec["data"], rec["suffix"]
+                None, _extract, rec["data"], rec["suffix"], rec["engine"]
             )
             rec["status"] = "done" if rec["result"].get("ok") else "error"
         except Exception as exc:  # noqa: BLE001
@@ -176,17 +224,20 @@ async def lifespan(app: FastAPI):
         t.cancel()
 
 
-app = FastAPI(title="Docling Extractor", version="1.0", lifespan=lifespan)
+app = FastAPI(title="Document Extractor", version="2.0", lifespan=lifespan)
 
 
 def _check_auth(authorization: str | None) -> None:
-    if not SERVICE_TOKEN:
-        return
-    if authorization != f"Bearer {SERVICE_TOKEN}":
+    if SERVICE_TOKEN and authorization != f"Bearer {SERVICE_TOKEN}":
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
-def _enqueue(data: bytes, filename: str | None) -> str:
+def _norm_engine(engine: str | None) -> str:
+    e = (engine or DEFAULT_ENGINE).lower()
+    return e if e in ("auto", "pymupdf", "paddle", "docling") else "auto"
+
+
+def _enqueue(data: bytes, filename: str | None, engine: str) -> str:
     if len(data) > MAX_BYTES:
         raise HTTPException(status_code=413, detail="File too large")
     job_id = uuid.uuid4().hex
@@ -195,6 +246,7 @@ def _enqueue(data: bytes, filename: str | None) -> str:
         "status": "queued",
         "data": data,
         "suffix": suffix,
+        "engine": engine,
         "filename": filename,
         "result": None,
         "event": asyncio.Event(),
@@ -208,22 +260,15 @@ def _enqueue(data: bytes, filename: str | None) -> str:
     return job_id
 
 
-def _public(rec: dict) -> dict:
-    return {
-        "status": rec["status"],
-        "filename": rec.get("filename"),
-        "queued_at": rec.get("created_at"),
-        "result": rec.get("result"),
-    }
-
-
 # --- endpoints -------------------------------------------------------------
 @app.get("/health")
 def health() -> dict:
     return {
         "ok": True,
-        "service": "docling-extractor",
-        "ocr_langs": OCR_LANGS,
+        "service": "document-extractor",
+        "engines": ["pymupdf", "paddle", "docling"],
+        "default_engine": DEFAULT_ENGINE,
+        "paddle_lang": PADDLE_LANG,
         "workers": NUM_WORKERS,
         "queue_depth": _queue.qsize(),
         "queue_max": QUEUE_MAX,
@@ -234,29 +279,29 @@ def health() -> dict:
 @app.post("/extract")
 async def extract(
     file: UploadFile = File(...),
+    engine: str | None = Form(default=None),
     authorization: str | None = Header(default=None),
 ) -> dict:
-    """Synchronous: enqueue and wait for the result (bounded by EXTRACT_TIMEOUT)."""
     _check_auth(authorization)
     data = await file.read()
-    job_id = _enqueue(data, file.filename)
+    job_id = _enqueue(data, file.filename, _norm_engine(engine))
     rec = _jobs[job_id]
     try:
         await asyncio.wait_for(rec["event"].wait(), timeout=EXTRACT_TIMEOUT)
     except asyncio.TimeoutError:
-        raise HTTPException(status_code=504, detail="Extraction timed out; try /jobs (async)")
+        raise HTTPException(status_code=504, detail="Extraction timed out; use /jobs (async)")
     return rec["result"]
 
 
 @app.post("/jobs")
 async def submit_job(
     file: UploadFile = File(...),
+    engine: str | None = Form(default=None),
     authorization: str | None = Header(default=None),
 ) -> dict:
-    """Async: enqueue and return a job_id immediately. Poll GET /jobs/{id}."""
     _check_auth(authorization)
     data = await file.read()
-    job_id = _enqueue(data, file.filename)
+    job_id = _enqueue(data, file.filename, _norm_engine(engine))
     return {"job_id": job_id, "status": "queued", "queue_depth": _queue.qsize()}
 
 
@@ -266,4 +311,10 @@ def get_job(job_id: str, authorization: str | None = Header(default=None)) -> di
     rec = _jobs.get(job_id)
     if rec is None:
         raise HTTPException(status_code=404, detail="Job not found or expired")
-    return {"job_id": job_id, **_public(rec)}
+    return {
+        "job_id": job_id,
+        "status": rec["status"],
+        "filename": rec.get("filename"),
+        "engine": rec.get("engine"),
+        "result": rec.get("result"),
+    }

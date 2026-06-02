@@ -1,12 +1,14 @@
 # docling-extractor
 
-Shared OCR / document-to-text microservice. A FastAPI wrapper around
-[Docling](https://github.com/DS4SD/docling) that converts PDFs and images
-(including scanned and multilingual — Indian regional scripts) into structured
-Markdown + page count.
+Shared document-to-text microservice. Tiered extraction, cheapest-first:
 
-**Generic, no app logic.** Any app POSTs a file and gets text back, then runs
-its own LLM analysis downstream:
+1. **PyMuPDF** — primary. Pulls the embedded text layer of digital PDFs. Instant.
+2. **PaddleOCR** — fallback OCR for scanned pages (renders + OCRs each page).
+3. **Docling** — complex layouts (tables, multi-column) when explicitly asked.
+
+Downstream, the calling app runs the AI analysis (Claude / GPT) on the text.
+
+**Generic, no app logic.** Any app POSTs a file and gets text back:
 - land-title verification → legal title prompt
 - trading research → company / components / info prompt
 
@@ -14,53 +16,55 @@ its own LLM analysis downstream:
 
 Auth: if `DOCLING_SERVICE_TOKEN` is set, send `Authorization: Bearer <token>`.
 
-| Method | Path            | Body                      | Returns |
-|--------|-----------------|---------------------------|---------|
-| GET    | `/health`       | —                         | service + queue stats |
-| POST   | `/extract`      | multipart `file=@doc.pdf` | waits, returns `{ ok, pages, chars, markdown }` |
-| POST   | `/jobs`         | multipart `file=@doc.pdf` | `{ job_id, status }` immediately |
-| GET    | `/jobs/{id}`    | —                         | `{ status, result }` (`queued`/`processing`/`done`/`error`) |
+| Method | Path         | Body                                   | Returns |
+|--------|--------------|----------------------------------------|---------|
+| GET    | `/health`    | —                                      | engines + queue stats |
+| POST   | `/extract`   | multipart `file=@doc.pdf` `engine=`    | waits → `{ ok, method, pages, chars, markdown }` |
+| POST   | `/jobs`      | multipart `file=@doc.pdf` `engine=`    | `{ job_id, status }` immediately |
+| GET    | `/jobs/{id}` | —                                      | `{ status, result }` |
 
-### Sync (simple, low volume)
-```bash
-curl -s -H "Authorization: Bearer $TOKEN" -F "file=@deed.pdf" \
-  https://docling.example.com/extract | jq '{pages, chars}'
-```
+**`engine`** (optional form field): `auto` (default — PyMuPDF, then PaddleOCR if
+the text layer is thin), `pymupdf` (text layer only), `paddle` (force OCR),
+`docling` (complex layouts). The result's `method` reports which actually ran.
 
-### Async + poll (concurrency / long docs)
 ```bash
-JOB=$(curl -s -H "Authorization: Bearer $TOKEN" -F "file=@deed.pdf" \
+# auto: instant for digital PDFs, OCR fallback for scans
+curl -s -H "Authorization: Bearer $TOKEN" -F "file=@ec.pdf" \
+  https://docling.example.com/extract | jq '{method, pages, chars}'
+
+# async + poll for big scans
+JOB=$(curl -s -H "Authorization: Bearer $TOKEN" -F "file=@deed.pdf" -F "engine=paddle" \
   https://docling.example.com/jobs | jq -r .job_id)
-curl -s -H "Authorization: Bearer $TOKEN" \
-  https://docling.example.com/jobs/$JOB | jq .status   # poll until "done"
+curl -s -H "Authorization: Bearer $TOKEN" https://docling.example.com/jobs/$JOB | jq .status
 ```
 
 ## Queue
 
-Extraction is serialised through an in-process queue so concurrent callers from
-multiple apps don't thrash a CPU box — requests **queue** instead of competing.
-Both `/extract` and `/jobs` feed the same queue; `/extract` just waits on the
-result. Tune via env:
+Both `/extract` and `/jobs` feed one in-process queue so concurrent callers
+don't thrash a CPU box. `/extract` waits on the result; `/jobs` returns an id to
+poll. Env:
 
 | Env | Default | Meaning |
 |-----|---------|---------|
+| `DOCLING_DEFAULT_ENGINE` | `auto` | engine when the request omits one |
+| `PADDLE_LANG` | `en` | PaddleOCR language (one): `en`, `ch`, `ta`, `te`, `ka`, `devanagari`, … |
+| `DOCLING_OCR_DPI` | `200` | page render DPI for OCR (higher = better + slower) |
 | `DOCLING_WORKERS` | `1` | parallel conversions (raise only with more RAM) |
 | `DOCLING_QUEUE_MAX` | `32` | max queued jobs (`503` when full) |
-| `DOCLING_EXTRACT_TIMEOUT` | `300` | seconds `/extract` waits before `504` |
-| `DOCLING_JOB_TTL` | `600` | seconds a finished job is retained for polling |
-| `DOCLING_OCR_LANGS` | `eng` | OCR languages, comma-separated. **Keep short** — Tesseract re-OCRs every page per language, so each one adds time. e.g. `eng,tam`. |
+| `DOCLING_EXTRACT_TIMEOUT` | `600` | seconds `/extract` waits before `504` |
+| `DOCLING_JOB_TTL` | `1800` | seconds a finished job is retained for polling |
 | `DOCLING_MAX_BYTES` | `41943040` | max upload size (40 MB) |
 | `DOCLING_SERVICE_TOKEN` | — | bearer token; unset = no auth (local only) |
 
-> The queue + job store are **in-process** — run a single uvicorn worker (the
-> Dockerfile does). State is lost on restart; for durable cross-process queuing,
-> swap in Redis/RQ. Single CPU worker is right for low/moderate volume.
+> Queue + job store are **in-process** — single uvicorn worker. State is lost on
+> restart; for durable cross-process queuing, swap in Redis/RQ.
 
-## Run locally
-```bash
-pip install -r requirements.txt
-uvicorn main:app --reload --port 8000      # first call downloads Docling models
-```
+## Speed
+
+- **Digital PDFs** (most registrar-portal ECs/deeds have a text layer) → PyMuPDF,
+  seconds regardless of page count.
+- **Scanned PDFs/images** → PaddleOCR per page (~1-3 s/page on CPU).
+- **Complex tables/layout** → `engine=docling` (slowest, best structure).
 
 ## Deploy (Docker, e.g. Hetzner)
 ```bash
@@ -68,22 +72,15 @@ export DOCLING_SERVICE_TOKEN="$(openssl rand -hex 32)"   # save it
 docker compose up -d --build                              # models baked at build
 curl -s localhost:8000/health
 ```
-Put behind a TLS reverse proxy (Caddy auto-TLS):
-```
-docling.example.com {
-    reverse_proxy 127.0.0.1:8000
-    request_body { max_size 40MB }
-}
-```
-Notes:
-- CPU-only torch (Dockerfile) — avoids multi-GB CUDA libs.
-- Give the container ≥ 4 GB RAM; CPU works (≈10–60 s/doc), GPU faster.
-- Models are baked into the image (no runtime download).
+Behind a TLS reverse proxy (nginx/Caddy), raise `client_max_body_size` to 40 MB.
+
+> **Image is heavy** — PyTorch (Docling) + PaddlePaddle + models. Give the box
+> ≥ 4 GB RAM and a few GB free disk. Engines lazy-load, so only the one in use
+> occupies memory at runtime.
 
 ## Callers
-Each app sets:
 ```
 DOCLING_SERVICE_URL=https://docling.example.com
 DOCLING_SERVICE_TOKEN=<same token>
 ```
-and POSTs to `/extract` (or `/jobs`).
+POST to `/extract` (small/sync) or `/jobs` (big/async), optionally with `engine`.
