@@ -1,0 +1,30 @@
+services:
+  docling:
+    build: .
+    image: docling-extractor:latest
+    container_name: docling-extractor
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      # Shared secret — must match DOCLING_SERVICE_TOKEN in each caller app's env.
+      DOCLING_SERVICE_TOKEN: ${DOCLING_SERVICE_TOKEN:-}
+      DOCLING_MAX_BYTES: ${DOCLING_MAX_BYTES:-41943040}
+      # Concurrency. Keep 1 on a small/CPU box; raise only with more RAM.
+      DOCLING_WORKERS: ${DOCLING_WORKERS:-1}
+      DOCLING_QUEUE_MAX: ${DOCLING_QUEUE_MAX:-32}
+      DOCLING_JOB_TTL: ${DOCLING_JOB_TTL:-600}
+      DOCLING_EXTRACT_TIMEOUT: ${DOCLING_EXTRACT_TIMEOUT:-300}
+    # Models are baked into the image at build time — no volume needed.
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
