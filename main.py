@@ -25,6 +25,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile
 
+from pypdf import PdfReader
+
 from docling.datamodel.base_models import InputFormat
 from docling.datamodel.pipeline_options import (
     PdfPipelineOptions,
@@ -44,6 +46,11 @@ OCR_LANGS = [
 SERVICE_TOKEN = os.environ.get("DOCLING_SERVICE_TOKEN", "")
 MAX_BYTES = int(os.environ.get("DOCLING_MAX_BYTES", str(40 * 1024 * 1024)))
 NUM_WORKERS = int(os.environ.get("DOCLING_WORKERS", "1"))
+# Fast path: if a PDF already has a real text layer (most registrar-portal ECs
+# and deeds are digital), read it directly with pypdf instead of OCR'ing every
+# page — seconds vs. minutes. Only genuinely scanned PDFs fall through to OCR.
+# Set DOCLING_FORCE_OCR=1 to always OCR.
+FORCE_OCR = os.environ.get("DOCLING_FORCE_OCR", "0") == "1"
 QUEUE_MAX = int(os.environ.get("DOCLING_QUEUE_MAX", "32"))
 JOB_TTL = int(os.environ.get("DOCLING_JOB_TTL", "600"))  # keep finished jobs (s)
 EXTRACT_TIMEOUT = int(os.environ.get("DOCLING_EXTRACT_TIMEOUT", "300"))  # /extract wait (s)
@@ -70,11 +77,40 @@ _jobs: dict[str, dict] = {}
 _queue: asyncio.Queue[str] = asyncio.Queue(maxsize=QUEUE_MAX)
 
 
+def _quick_pdf_text(path: str) -> tuple[str, int] | None:
+    """Return (text, pages) if the PDF has a usable embedded text layer, else None."""
+    try:
+        reader = PdfReader(path)
+        n_pages = len(reader.pages) or 1
+        parts = [(p.extract_text() or "") for p in reader.pages]
+        text = "\n\n".join(parts).strip()
+        # Heuristic: enough text per page means it's a real text layer, not a scan.
+        if len(text) >= max(200, n_pages * 50):
+            return text, n_pages
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
 def _convert_blocking(data: bytes, suffix: str) -> dict:
     """Runs in a thread (Docling is blocking/CPU-bound)."""
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=True) as tmp:
         tmp.write(data)
         tmp.flush()
+
+        # Fast path: digital PDF with a text layer → skip OCR entirely.
+        if suffix.lower() == ".pdf" and not FORCE_OCR:
+            quick = _quick_pdf_text(tmp.name)
+            if quick is not None:
+                text, pages = quick
+                return {
+                    "ok": True,
+                    "pages": pages,
+                    "chars": len(text),
+                    "markdown": text,
+                    "method": "text-layer",
+                }
+
         try:
             result = CONVERTER.convert(tmp.name)
         except Exception as exc:  # noqa: BLE001
@@ -85,7 +121,7 @@ def _convert_blocking(data: bytes, suffix: str) -> dict:
         pages = len(doc.pages)
     except Exception:  # noqa: BLE001
         pages = 0
-    return {"ok": True, "pages": pages, "chars": len(markdown), "markdown": markdown}
+    return {"ok": True, "pages": pages, "chars": len(markdown), "markdown": markdown, "method": "ocr"}
 
 
 async def _worker() -> None:
@@ -112,8 +148,8 @@ async def _worker() -> None:
             dt = time.time() - rec["started_at"]
             r = rec.get("result") or {}
             print(
-                f"[extract] done  {name} ok={r.get('ok')} pages={r.get('pages')} "
-                f"chars={r.get('chars')} in {dt:.1f}s",
+                f"[extract] done  {name} ok={r.get('ok')} method={r.get('method')} "
+                f"pages={r.get('pages')} chars={r.get('chars')} in {dt:.1f}s",
                 flush=True,
             )
             rec["finished_at"] = time.time()
