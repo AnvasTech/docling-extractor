@@ -88,6 +88,12 @@ async def _worker() -> None:
             rec["result"] = await loop.run_in_executor(None, _do)
             rec["status"] = "done" if rec["result"].ok else "error"
         except Exception:  # noqa: BLE001
+            import traceback
+
+            print(
+                f"[job] FAILED {rec.get('filename')}: {traceback.format_exc()}",
+                flush=True,
+            )
             rec["status"] = "error"
         finally:
             rec["finished_at"] = time.time()

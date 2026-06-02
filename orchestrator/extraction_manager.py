@@ -42,7 +42,11 @@ def extract(
     force_engine: str | None = None,
 ) -> ExtractionResult:
     started = time.perf_counter()
-    analysis = analyze(path)
+    try:
+        analysis = analyze(path)
+    except Exception as exc:  # noqa: BLE001 - never let analysis failure block extraction
+        log(logger, logging.WARNING, "analysis_failed", file=file_name, error=str(exc))
+        analysis = DocumentAnalysis()  # defaults → DIGITAL_TEXT → PyMuPDF first
     plan = routing_engine.decide(analysis, mode, force_engine)
     log(logger, logging.INFO, "plan", file=file_name, cascade=plan.cascade, rationale=plan.rationale)
 
