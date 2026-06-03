@@ -59,6 +59,11 @@ def get(job_id: str) -> dict | None:
         "status": rec["status"],
         "filename": rec.get("filename"),
         "engine": rec.get("engine"),
+        # Live planning hints (set once the orchestrator picks a cascade), so the
+        # client can show which engine is running and warn on slow image OCR.
+        "planned_engine": rec.get("planned_engine"),
+        "image_based": rec.get("image_based"),
+        "doc_class": rec.get("doc_class"),
         "result": result.model_dump() if result is not None else None,
     }
 
@@ -76,6 +81,12 @@ async def _worker() -> None:
             data = rec["data"]
             engine = rec["engine"]
 
+            def _on_plan(planned: str, doc_class: str, image_based: bool) -> None:
+                rec["planned_engine"] = planned
+                rec["image_based"] = image_based
+                rec["doc_class"] = doc_class
+                rec["status"] = "extracting"
+
             def _do() -> object:
                 with materialize(data) as path:
                     return run_extract(
@@ -83,6 +94,7 @@ async def _worker() -> None:
                         mode=ExtractionMode.AUTO,
                         file_name=rec.get("filename") or "",
                         force_engine=engine if engine != "auto" else None,
+                        on_plan=_on_plan,
                     )
 
             rec["result"] = await loop.run_in_executor(None, _do)

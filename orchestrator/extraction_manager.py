@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from typing import Callable
 
 from analyzers import pdf_classifier, quality_analyzer
 from core.logging_setup import get_logger, log
@@ -40,6 +41,7 @@ def extract(
     document_id: str = "",
     document_type: str = "",
     force_engine: str | None = None,
+    on_plan: Callable[[str, str, bool], None] | None = None,
 ) -> ExtractionResult:
     started = time.perf_counter()
     try:
@@ -49,6 +51,18 @@ def extract(
         analysis = DocumentAnalysis()  # defaults → DIGITAL_TEXT → PyMuPDF first
     plan = routing_engine.decide(analysis, mode, force_engine)
     log(logger, logging.INFO, "plan", file=file_name, cascade=plan.cascade, rationale=plan.rationale)
+
+    # Publish the planned primary engine before the (possibly slow) run so the
+    # client can show "extracting with Docling — image-based, slower" live.
+    planned_engine = plan.cascade[0] if plan.cascade else "pymupdf"
+    image_based = planned_engine in ("rapidocr", "docling") or bool(
+        getattr(analysis, "ocr_required", False)
+    )
+    if on_plan is not None:
+        try:
+            on_plan(planned_engine, analysis.document_class.value, image_based)
+        except Exception:  # noqa: BLE001 - telemetry must never break extraction
+            pass
 
     rag = mode is ExtractionMode.RAG
 
