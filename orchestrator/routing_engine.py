@@ -24,6 +24,10 @@ def decide(
 
     if force_engine:
         reasons.append(f"forced={force_engine}")
+    if analysis.primary_language is not Language.UNKNOWN:
+        reasons.append(f"lang={analysis.primary_language.value}")
+    if analysis.handwritten:
+        reasons.append("handwritten")
 
     # Mixed-language bundles where layout matters extract better with Docling —
     # make sure it's in the cascade for LEGAL/AUTO.
@@ -32,13 +36,14 @@ def decide(
             cascade = cascade + ["docling"]
         reasons.append("mixed_language→docling_fallback")
 
-    # Scanned non-English needs the OCR engine up front.
+    # Scanned non-English must lead with the language-appropriate OCR engine.
     if analysis.is_scanned and analysis.primary_language not in (
         Language.ENGLISH,
         Language.UNKNOWN,
     ):
-        if cascade and cascade[0] != "rapidocr":
-            cascade = ["rapidocr"] + [c for c in cascade if c != "rapidocr"]
+        lead = strategy_selector.ocr_engines(analysis)[0]
+        if cascade and cascade[0] != lead and not force_engine:
+            cascade = [lead] + [c for c in cascade if c != lead]
         reasons.append(f"scanned_{analysis.primary_language.value}→ocr_first")
 
     return ExtractionPlan(cascade=cascade, rationale="; ".join(reasons))

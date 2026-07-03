@@ -10,7 +10,7 @@ def test_finalize_mirrors_compat_fields():
 
 
 def test_dump_has_backward_compat_keys():
-    r = ExtractionResult(text="x", extraction_method="rapidocr").finalize()
+    r = ExtractionResult(text="x", extraction_method="easyocr").finalize()
     d = r.model_dump()
     for key in ("ok", "markdown", "method", "chars", "text", "extraction_method"):
         assert key in d

@@ -10,7 +10,7 @@ acceptable quality, then escalates only when needed.
 api/            HTTP layer (extract, jobs, health, metrics)
 orchestrator/   routing_engine → strategy_selector → extraction_manager (cascade + escalation)
 analyzers/      pdf_classifier, language_detector, layout_detector, quality_analyzer
-extractors/     pymupdf, rapidocr, docling, opendataloader  (Extractor ABC)
+extractors/     pymupdf, easyocr, tesseract, docling, opendataloader  (Extractor ABC)
 schemas/        document_schema (analysis), extraction_result (unified output)
 services/       temp_file_manager, fingerprint_service, metrics_service, job_queue
 integrations/   supabase_client (signed-URL download)
@@ -40,7 +40,7 @@ The Title Verification app is unchanged:
 - `GET /jobs/{id}` → `{status, result}` where `result` carries the legacy
   `ok` / `markdown` / `method` / `pages` / `chars` fields (mirrored by
   `ExtractionResult.finalize()`), plus the new unified fields.
-- `engine` values `pymupdf|ocr|paddle|docling` map to forced single-engine runs.
+- `engine` values `pymupdf|ocr|easyocr|tesseract|docling` map to forced single-engine runs (`ocr`/`paddle`/`rapidocr` resolve to the language-appropriate OCR engine).
 
 ## New API
 ```
@@ -52,9 +52,9 @@ POST /extract
 `/extract` also accepts a multipart `file` (legacy direct upload).
 
 ## Modes
-- **auto** — class-driven (digital→PyMuPDF, scanned→RapidOCR, table/layout→Docling).
-- **fast** — PyMuPDF → RapidOCR. Bulk ingestion.
-- **legal** — PyMuPDF → RapidOCR → Docling. Title verification (default for TITAN).
+- **auto** — class-driven (digital→PyMuPDF, scanned→EasyOCR/Tesseract by language, handwritten→both OCR engines, table/layout→Docling).
+- **fast** — PyMuPDF → best OCR. Bulk ingestion.
+- **legal** — PyMuPDF → EasyOCR → Tesseract → Docling. Title verification (default for TITAN).
 - **rag** — OpenDataLoader-PDF (→ Docling fallback). Only when RAG output requested.
 
 ## Migration plan (zero downtime)
@@ -63,7 +63,7 @@ POST /extract
    (signed URL from Supabase) when ready; until then `/jobs` is unchanged.
 3. Enable `mode=rag` once OpenDataLoader-PDF is validated on the box
    (`pip install -r requirements-rag.txt`).
-4. Add future languages by extending `Language` + `_SCRIPT_RANGES` and Paddle/RapidOCR
+4. Add future languages by extending `Language` + `_SCRIPT_RANGES` and the engine code maps in `core/languages.py`
    language packs — no routing changes needed.
 
 ## Deployment

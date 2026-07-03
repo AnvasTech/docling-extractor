@@ -1,12 +1,23 @@
 FROM python:3.12-slim
 
 # System deps:
-#  - tesseract (Docling's OCR backend for the complex-layout path)
-#  - poppler (PDF utils), libGL/glib (OpenCV, used by RapidOCR)
-#  - libgomp (ONNX Runtime)
+#  - tesseract + Indic language packs (ta/hi/ml/te/kn/gu/bn) and OSD script
+#    detection data — used by the sampler, the Tesseract extractor, and
+#    Docling's OCR stage
+#  - poppler (PDF utils), libGL/glib (OpenCV, used by EasyOCR)
+#  - libgomp (torch/onnx runtimes)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tesseract-ocr \
     tesseract-ocr-eng \
+    tesseract-ocr-osd \
+    tesseract-ocr-tam \
+    tesseract-ocr-hin \
+    tesseract-ocr-mal \
+    tesseract-ocr-tel \
+    tesseract-ocr-kan \
+    tesseract-ocr-guj \
+    tesseract-ocr-ben \
+    tesseract-ocr-mar \
     poppler-utils \
     libgl1 \
     libglib2.0-0 \
@@ -15,7 +26,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# CPU-only PyTorch FIRST (Docling dependency) — avoids multi-GB CUDA libraries.
+# CPU-only PyTorch FIRST (Docling + EasyOCR dependency) — avoids multi-GB CUDA libraries.
 RUN pip install --no-cache-dir \
     torch torchvision --index-url https://download.pytorch.org/whl/cpu
 
@@ -27,8 +38,11 @@ RUN pip install --no-cache-dir -r requirements-rag.txt || \
     echo "opendataloader-pdf optional: skipped"
 
 # Bake Docling layout/table models into the image (no runtime download).
-# RapidOCR ships its PP-OCR ONNX models inside the wheel — nothing to download.
 RUN docling-tools models download
+
+# Bake EasyOCR detection + per-language recognition models (ta/te/kn/bn/hi
+# each ship their own recognition model; en rides along in every reader).
+RUN python -c "import easyocr; [easyocr.Reader([l, 'en'], gpu=False, verbose=False) for l in ('ta', 'te', 'kn', 'bn', 'hi')]"
 
 COPY . .
 

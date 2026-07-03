@@ -17,7 +17,7 @@ def health() -> dict:
         "ok": True,
         "service": "document-extractor",
         "version": "2.0",
-        "engines": ["pymupdf", "rapidocr", "docling", "opendataloader"],
+        "engines": ["pymupdf", "easyocr", "tesseract", "docling", "opendataloader"],
         "modes": ["auto", "fast", "legal", "rag"],
         "default_mode": settings.default_mode,
         "workers": settings.workers,

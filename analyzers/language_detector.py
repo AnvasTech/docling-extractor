@@ -16,6 +16,7 @@ _SCRIPT_RANGES: list[tuple[int, int, Language]] = [
     (0x0C80, 0x0CFF, Language.KANNADA),
     (0x0D00, 0x0D7F, Language.MALAYALAM),
     (0x0A80, 0x0AFF, Language.GUJARATI),
+    (0x0980, 0x09FF, Language.BENGALI),
 ]
 
 
@@ -60,6 +61,12 @@ def detect(text: str) -> tuple[Language, float]:
                 "en": Language.ENGLISH,
                 "ta": Language.TAMIL,
                 "hi": Language.HINDI,
+                "te": Language.TELUGU,
+                "kn": Language.KANNADA,
+                "ml": Language.MALAYALAM,
+                "gu": Language.GUJARATI,
+                "bn": Language.BENGALI,
+                "mr": Language.MARATHI,
             }.get(code)
             if mapped is not None:
                 primary = mapped

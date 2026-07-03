@@ -20,6 +20,7 @@ class DocumentClass(str, Enum):
     MIXED = "MIXED"
     TABLE_HEAVY = "TABLE_HEAVY"
     LAYOUT_HEAVY = "LAYOUT_HEAVY"
+    HANDWRITTEN = "HANDWRITTEN"
     LEGAL_DOCUMENT = "LEGAL_DOCUMENT"
     RAG_REQUIRED = "RAG_REQUIRED"
 
@@ -33,6 +34,7 @@ class Language(str, Enum):
     MALAYALAM = "ml"
     MARATHI = "mr"
     GUJARATI = "gu"
+    BENGALI = "bn"
     UNKNOWN = "unknown"
 
 
@@ -47,6 +49,7 @@ class PageProfile(BaseModel):
     rect_count: int = 0
     language: Language = Language.UNKNOWN
     language_confidence: float = 0.0
+    ocr_sample_confidence: float | None = None  # mean word confidence from the sampling pass
 
 
 class DocumentAnalysis(BaseModel):
@@ -59,6 +62,7 @@ class DocumentAnalysis(BaseModel):
     is_mixed: bool = False
     has_tables: bool = False
     layout_complex: bool = False
+    handwritten: bool = False
     ocr_required: bool = False
     primary_language: Language = Language.UNKNOWN
     secondary_languages: list[Language] = Field(default_factory=list)

@@ -14,6 +14,18 @@ def test_tamil_script():
     assert conf > 0.5
 
 
+def test_bengali_script():
+    lang, conf = ld.detect("এটি একটি বাংলা দলিল")
+    assert lang is Language.BENGALI
+    assert conf > 0.5
+
+
+def test_malayalam_script():
+    lang, conf = ld.detect("ഇത് ഒരു മലയാളം ആധാരം ആണ്")
+    assert lang is Language.MALAYALAM
+    assert conf > 0.5
+
+
 def test_empty():
     lang, conf = ld.detect("   ")
     assert lang is Language.UNKNOWN

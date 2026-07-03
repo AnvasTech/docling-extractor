@@ -45,6 +45,14 @@ class Settings:
     extraction_threshold: float = field(default_factory=lambda: _float("DOCLING_EXTRACT_THRESHOLD", 0.90))
     layout_threshold: float = field(default_factory=lambda: _float("DOCLING_LAYOUT_THRESHOLD", 0.60))
 
+    # Classification: scanned pages whose sample-OCR word confidence falls
+    # below this are treated as handwritten.
+    handwriting_conf_threshold: float = field(default_factory=lambda: _float("DOCLING_HANDWRITING_CONF", 0.40))
+
+    # EasyOCR runtime
+    easyocr_gpu: bool = field(default_factory=lambda: os.environ.get("DOCLING_EASYOCR_GPU", "0") == "1")
+    ocr_page_workers: int = field(default_factory=lambda: _int("DOCLING_OCR_PAGE_WORKERS", 4))
+
     log_level: str = field(default_factory=lambda: os.environ.get("LOG_LEVEL", "INFO"))
 
 

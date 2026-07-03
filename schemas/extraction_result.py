@@ -35,7 +35,7 @@ class ExtractionResult(BaseModel):
     page_languages: dict[int, str] = Field(default_factory=dict)
 
     ocr_required: bool = False
-    extraction_method: str = ""  # e.g. "pymupdf" | "rapidocr" | "docling" | "opendataloader"
+    extraction_method: str = ""  # e.g. "pymupdf" | "easyocr" | "tesseract" | "docling" | "opendataloader"
     extraction_chain: list[str] = Field(default_factory=list)
 
     confidence_score: float = 0.0

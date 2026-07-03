@@ -5,14 +5,15 @@ from __future__ import annotations
 import time
 from typing import Callable
 
-from analyzers import pdf_classifier, quality_analyzer
+from analyzers import ocr_sampler, pdf_classifier, quality_analyzer
 from core.logging_setup import get_logger, log
 import logging
 from extractors.base import Extractor, ExtractorOutput
 from extractors.docling_extractor import DoclingExtractor
+from extractors.easyocr_extractor import EasyOCRExtractor
 from extractors.opendataloader_extractor import OpenDataLoaderExtractor
 from extractors.pymupdf_extractor import PyMuPDFExtractor
-from extractors.rapidocr_extractor import RapidOCRExtractor, sample as ocr_sample
+from extractors.tesseract_extractor import TesseractExtractor
 from schemas.document_schema import DocumentAnalysis, ExtractionMode
 from schemas.extraction_result import ExtractionResult
 from . import routing_engine
@@ -22,14 +23,17 @@ logger = get_logger("orchestrator")
 # Registry — single instances, engines lazy-load their models on first use.
 _REGISTRY: dict[str, Extractor] = {
     "pymupdf": PyMuPDFExtractor(),
-    "rapidocr": RapidOCRExtractor(),
+    "easyocr": EasyOCRExtractor(),
+    "tesseract": TesseractExtractor(),
     "docling": DoclingExtractor(),
     "opendataloader": OpenDataLoaderExtractor(),
 }
 
+_OCR_ENGINES = ("easyocr", "tesseract", "docling")
+
 
 def analyze(path: str) -> DocumentAnalysis:
-    sampler = ocr_sample if _REGISTRY["rapidocr"].available() else None
+    sampler = ocr_sampler.sample if ocr_sampler.available() else None
     return pdf_classifier.classify(path, ocr_sampler=sampler)
 
 
@@ -55,7 +59,7 @@ def extract(
     # Publish the planned primary engine before the (possibly slow) run so the
     # client can show "extracting with Docling — image-based, slower" live.
     planned_engine = plan.cascade[0] if plan.cascade else "pymupdf"
-    image_based = planned_engine in ("rapidocr", "docling") or bool(
+    image_based = planned_engine in _OCR_ENGINES or bool(
         getattr(analysis, "ocr_required", False)
     )
     if on_plan is not None:
@@ -134,6 +138,7 @@ def extract(
         metadata={
             "document_class": analysis.document_class.value,
             "digital_text_ratio": analysis.digital_text_ratio,
+            "handwritten": analysis.handwritten,
             "rationale": plan.rationale,
             **best.metadata,
         },

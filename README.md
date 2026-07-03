@@ -5,8 +5,15 @@ Property Title Verification platform. It analyses each document, picks the
 cheapest engine that can hit acceptable quality, escalates only when needed, and
 returns one normalized JSON — the caller never knows which engine ran.
 
-Engines: **PyMuPDF** (text layer) · **RapidOCR** (scanned) · **Docling**
-(complex layout/tables) · **OpenDataLoader-PDF** (RAG, optional).
+Engines: **PyMuPDF** (text layer) · **EasyOCR** (scanned — ta/te/kn/bn/hi/mr/en) ·
+**Tesseract** (scanned — ml/gu + fallback for all scripts) · **Docling**
+(complex layout/tables, language-aware OCR) · **OpenDataLoader-PDF** (RAG, optional).
+
+Supported languages: English, Tamil, Hindi, Malayalam, Telugu, Kannada,
+Gujarati, Bengali (+ Marathi via Devanagari). The classifier's rough scan
+decides text-based vs image-based, script/language (Tesseract OSD + sample
+OCR), printed vs handwritten (sample-OCR confidence), and tables/layout —
+then routes to the engine that actually reads that script.
 
 > **Stateless by design.** No DB, no cache, no persisted documents/text/metadata,
 > no shared filesystem. Temp files are deleted after every request. Supabase
@@ -38,13 +45,15 @@ GET  /metrics     → request counts, avg latency, by-method
 ## Modes
 | Mode | Pipeline | Use |
 |------|----------|-----|
-| `auto` | class-driven | default; digital→PyMuPDF, scanned→RapidOCR, tables/layout→Docling |
-| `fast` | PyMuPDF → RapidOCR | bulk ingestion / indexing |
-| `legal` | PyMuPDF → RapidOCR → Docling | title verification (reading order + tables matter) |
+| `auto` | class-driven | default; digital→PyMuPDF, scanned→EasyOCR/Tesseract (by language), handwritten→both OCR engines, tables/layout→Docling |
+| `fast` | PyMuPDF → best OCR | bulk ingestion / indexing |
+| `legal` | PyMuPDF → EasyOCR → Tesseract → Docling | title verification (reading order + tables matter) |
 | `rag` | OpenDataLoader-PDF → Docling | RAG-ready markdown + chunks (only on request) |
 
-Escalation is confidence-gated: an engine's output is scored (text/OCR/layout
-confidence); below threshold the orchestrator escalates to the next engine.
+Escalation is confidence-gated: an engine's output is scored on density
+(chars/page) **and script match** (an engine OCRing Tamil with a Latin model
+produces plenty of characters in the wrong script — that now scores near zero
+and escalates); below threshold the orchestrator escalates to the next engine.
 
 ## Unified output (excerpt)
 ```json
@@ -70,8 +79,9 @@ See [MIGRATION.md](./MIGRATION.md) for the module map, flow, and migration plan.
 ## Config (env)
 `DOCLING_SERVICE_TOKEN`, `DOCLING_DEFAULT_MODE` (auto), `DOCLING_WORKERS` (1),
 `DOCLING_OCR_DPI` (200), `DOCLING_EXTRACT_THRESHOLD` (0.90),
-`DOCLING_LAYOUT_THRESHOLD` (0.60), `DOCLING_MAX_BYTES` (200 MB),
-`DOCLING_JOB_TTL` (1800), `LOG_LEVEL` (INFO).
+`DOCLING_LAYOUT_THRESHOLD` (0.60), `DOCLING_HANDWRITING_CONF` (0.40),
+`DOCLING_EASYOCR_GPU` (0), `DOCLING_OCR_PAGE_WORKERS` (4),
+`DOCLING_MAX_BYTES` (200 MB), `DOCLING_JOB_TTL` (1800), `LOG_LEVEL` (INFO).
 
 ## Run / deploy
 ```bash

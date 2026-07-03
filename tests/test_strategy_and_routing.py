@@ -22,7 +22,55 @@ def test_digital_auto_is_cheap():
 def test_scanned_auto_uses_ocr_first():
     a = _analysis(document_class=DocumentClass.SCANNED, is_digital=False, is_scanned=True)
     cascade = strategy_selector.select(a, ExtractionMode.AUTO)
-    assert cascade[0] == "rapidocr"
+    assert cascade[0] in ("easyocr", "tesseract")
+    assert cascade[-1] == "docling"
+
+
+def test_scanned_tamil_leads_with_easyocr():
+    a = _analysis(
+        document_class=DocumentClass.SCANNED,
+        is_digital=False,
+        is_scanned=True,
+        primary_language=Language.TAMIL,
+    )
+    cascade = strategy_selector.select(a, ExtractionMode.AUTO)
+    assert cascade[0] == "easyocr"
+    assert "tesseract" in cascade
+
+
+def test_scanned_malayalam_leads_with_tesseract():
+    # EasyOCR has no Malayalam model — Tesseract must lead.
+    a = _analysis(
+        document_class=DocumentClass.SCANNED,
+        is_digital=False,
+        is_scanned=True,
+        primary_language=Language.MALAYALAM,
+    )
+    cascade = strategy_selector.select(a, ExtractionMode.AUTO)
+    assert cascade[0] == "tesseract"
+
+
+def test_scanned_gujarati_leads_with_tesseract():
+    a = _analysis(
+        document_class=DocumentClass.SCANNED,
+        is_digital=False,
+        is_scanned=True,
+        primary_language=Language.GUJARATI,
+    )
+    cascade = strategy_selector.select(a, ExtractionMode.AUTO)
+    assert cascade[0] == "tesseract"
+
+
+def test_handwritten_runs_both_ocr_engines():
+    a = _analysis(
+        document_class=DocumentClass.HANDWRITTEN,
+        is_digital=False,
+        is_scanned=True,
+        handwritten=True,
+        primary_language=Language.TAMIL,
+    )
+    cascade = strategy_selector.select(a, ExtractionMode.AUTO)
+    assert set(cascade) == {"easyocr", "tesseract"}
 
 
 def test_rag_uses_opendataloader():
@@ -32,11 +80,18 @@ def test_rag_uses_opendataloader():
 
 def test_legal_full_cascade():
     cascade = strategy_selector.select(_analysis(), ExtractionMode.LEGAL)
-    assert cascade == ["pymupdf", "rapidocr", "docling"]
+    assert cascade == ["pymupdf", "easyocr", "tesseract", "docling"]
 
 
 def test_forced_engine_overrides():
     assert strategy_selector.select(_analysis(), ExtractionMode.AUTO, "docling") == ["docling"]
+
+
+def test_legacy_forced_ocr_maps_to_language_engines():
+    a = _analysis(primary_language=Language.MALAYALAM)
+    assert strategy_selector.select(a, ExtractionMode.AUTO, "rapidocr")[0] == "tesseract"
+    b = _analysis(primary_language=Language.TAMIL)
+    assert strategy_selector.select(b, ExtractionMode.AUTO, "ocr")[0] == "easyocr"
 
 
 def test_routing_scanned_tamil_puts_ocr_first():
@@ -47,5 +102,6 @@ def test_routing_scanned_tamil_puts_ocr_first():
         primary_language=Language.TAMIL,
     )
     plan = routing_engine.decide(a, ExtractionMode.AUTO)
-    assert plan.cascade[0] == "rapidocr"
+    assert plan.cascade[0] == "easyocr"
     assert "ocr_first" in plan.rationale
+    assert "lang=ta" in plan.rationale
