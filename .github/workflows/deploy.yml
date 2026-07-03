@@ -1,0 +1,31 @@
+name: Deploy docling-extractor (self-hosted)
+
+# Push to main -> the self-hosted runner on the Vultr server rebuilds the
+# docling container via the shared /opt/deploy compose stack. Internal-only:
+# no host port, no Caddy route, no DNS. Callers (getlegal) reach it privately
+# at http://docling:8000 on the compose 'web' network, guarded by
+# DOCLING_SERVICE_TOKEN. First-time setup (clone) is manual — see DEPLOY notes.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-docling
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, anvas]   # same label as getlegal / anvaslogistics
+    steps:
+      - name: Pull latest, rebuild container
+        run: |
+          set -euo pipefail
+          cd /opt/docling-extractor
+          git fetch origin main
+          git reset --hard origin/main
+          cd /opt/deploy
+          docker compose up -d --build docling
+          docker image prune -f
+          echo "Deployed $(cd /opt/docling-extractor && git rev-parse --short HEAD)"
