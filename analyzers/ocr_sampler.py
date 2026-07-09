@@ -81,22 +81,49 @@ def _ocr_with_confidence(image_path: str, lang: Language) -> PageSample:
 
 
 def sample(path: str, indices: list[int]) -> dict[int, PageSample]:
-    """OCR a few pages; best-effort, returns {} when tesseract is missing."""
+    """OCR a few pages; best-effort, returns {} when tesseract is missing.
+
+    OSD (script detection) runs once on the first sampled page — a document
+    doesn't change script mid-file — and the pages then OCR in parallel.
+    Serial OSD+OCR per page made classification of multi-page Indic scans take
+    a minute on CPU.
+    """
     if not available():
         return {}
+    import os
+    from concurrent.futures import ThreadPoolExecutor
+
     import fitz
 
-    out: dict[int, PageSample] = {}
+    valid: list[int] = []
+    paths: list[str] = []
     doc = fitz.open(path)
     try:
         for i in indices:
             if not (0 <= i < doc.page_count):
                 continue
             pix = doc.load_page(i).get_pixmap(dpi=settings.lang_sample_dpi)
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=True) as img:
-                pix.save(img.name)
-                script_lang = _detect_script(img.name)
-                out[i] = _ocr_with_confidence(img.name, script_lang)
+            img = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+            img.close()
+            pix.save(img.name)
+            valid.append(i)
+            paths.append(img.name)
     finally:
         doc.close()
+
+    out: dict[int, PageSample] = {}
+    try:
+        if not valid:
+            return out
+        script_lang = _detect_script(paths[0])
+        workers = max(1, min(len(valid), settings.ocr_page_workers))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            results = list(pool.map(lambda p: _ocr_with_confidence(p, script_lang), paths))
+        out = dict(zip(valid, results))
+    finally:
+        for p in paths:
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
     return out

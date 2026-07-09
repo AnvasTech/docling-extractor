@@ -71,3 +71,6 @@ class DocumentAnalysis(BaseModel):
     language_confidence: float = 0.0
     digital_text_ratio: float = 0.0  # fraction of pages with a usable text layer
     pages: list[PageProfile] = Field(default_factory=list)
+    # First sampled page's OCR text (scanned docs only) — reused by /analyze for
+    # content-based type detection so the endpoint never OCRs a second time.
+    sample_text: str = ""

@@ -107,16 +107,13 @@ async def extract(
     return result.model_dump()
 
 
-def _first_page_text(path: str) -> str:
+def _first_page_text(path: str, analysis) -> str:
     """First ~2000 chars of the document, for content-based type detection.
 
-    Digital text layer when present; otherwise a sample-OCR pass on page one
-    (same lightweight pass the classifier uses — headers in large fonts OCR
-    reliably even on rough scans).
+    Digital text layer when present; scanned documents reuse the classifier's
+    own sample-OCR text (analysis.sample_text) — no second OCR pass.
     """
     import fitz
-
-    from analyzers import ocr_sampler
 
     doc = fitz.open(path)
     try:
@@ -124,13 +121,8 @@ def _first_page_text(path: str) -> str:
     finally:
         doc.close()
     text = "\n".join(parts).strip()
-    if len(text) < 40 and ocr_sampler.available():
-        try:
-            sampled = ocr_sampler.sample(path, [0])
-            if 0 in sampled and sampled[0].text.strip():
-                text = sampled[0].text.strip()
-        except Exception:  # noqa: BLE001 - sampling is best-effort
-            pass
+    if len(text) < 40 and analysis.sample_text.strip():
+        text = analysis.sample_text.strip()
     return text[:2000]
 
 
@@ -147,7 +139,7 @@ async def analyze_document(
     with materialize(data, _suffix(file.filename or "")) as path:
         try:
             analysis = await _run_blocking(lambda: run_analyze(path))
-            sample_text = await _run_blocking(lambda: _first_page_text(path))
+            sample_text = await _run_blocking(lambda: _first_page_text(path, analysis))
         except Exception as exc:  # noqa: BLE001 - unreadable/corrupt file
             raise HTTPException(status_code=422, detail=f"Could not analyze file: {exc}")
     return {

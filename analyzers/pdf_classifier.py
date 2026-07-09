@@ -81,9 +81,12 @@ def classify(path: str, ocr_sampler: OcrSampler | None = None) -> DocumentAnalys
     # Language + handwriting sampling for scanned pages (few pages only).
     sample_confs: list[float] = []
     sampled_any_text = False
+    sample_text = ""
     if scanned_pages and ocr_sampler is not None:
         try:
             samples = ocr_sampler(path, _sample_indices(scanned_pages))
+            if samples:
+                sample_text = samples[min(samples)].text
             for idx, page_sample in samples.items():
                 lang, conf = langdet.detect(page_sample.text)
                 page_lang[idx] = (lang, conf)
@@ -145,4 +148,5 @@ def classify(path: str, ocr_sampler: OcrSampler | None = None) -> DocumentAnalys
         language_confidence=agg["confidence"],
         digital_text_ratio=round(digital_ratio, 3),
         pages=profiles,
+        sample_text=sample_text,
     )
