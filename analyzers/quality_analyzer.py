@@ -32,15 +32,44 @@ def script_match_ratio(text: str, expected: set[Language]) -> float:
     return matched / total
 
 
-def text_confidence(text: str, analysis: DocumentAnalysis) -> float:
-    """How complete and script-plausible the text looks for this document."""
+# Chars/page that count as a "full" page, by script. Indic scripts encode more
+# per character (conjuncts, matras) — a normal Tamil deed page carries far
+# fewer characters than an English one. A single 400-char bar made good Indic
+# OCR output look "thin" and forced pointless escalation to slower engines.
+_DENSITY_NORMS: dict[Language, float] = {
+    Language.ENGLISH: 400.0,
+    Language.TAMIL: 250.0,
+    Language.MALAYALAM: 250.0,
+    Language.TELUGU: 280.0,
+    Language.KANNADA: 280.0,
+    Language.GUJARATI: 280.0,
+    Language.HINDI: 300.0,
+    Language.MARATHI: 300.0,
+    Language.BENGALI: 300.0,
+}
+
+
+def text_confidence(
+    text: str,
+    analysis: DocumentAnalysis,
+    ocr_confidence: float | None = None,
+) -> float:
+    """How complete and script-plausible the text looks for this document.
+
+    `ocr_confidence` (the engine's own mean word confidence, 0..1) blends in
+    when provided, so a dense-but-garbled OCR pass still escalates and a
+    clean-but-short Indic page doesn't.
+    """
     if not text.strip():
         return 0.0
 
     pages = max(analysis.page_count, 1)
     per_page = len(text.strip()) / pages
-    # ~400+ chars/page on a text document → full confidence; scale below that.
-    score = min(per_page / 400.0, 1.0)
+    norm = _DENSITY_NORMS.get(analysis.primary_language, 400.0)
+    score = min(per_page / norm, 1.0)
+
+    if ocr_confidence is not None and ocr_confidence > 0:
+        score = 0.75 * score + 0.25 * min(ocr_confidence, 1.0)
 
     expected = {analysis.primary_language, *analysis.secondary_languages} - {
         Language.UNKNOWN

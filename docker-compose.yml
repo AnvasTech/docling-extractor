@@ -12,9 +12,16 @@ services:
       DOCLING_MAX_BYTES: ${DOCLING_MAX_BYTES:-41943040}
       # Default extraction mode: auto | fast | legal | rag
       DOCLING_DEFAULT_MODE: ${DOCLING_DEFAULT_MODE:-auto}
-      DOCLING_OCR_DPI: ${DOCLING_OCR_DPI:-200}
+      DOCLING_OCR_DPI: ${DOCLING_OCR_DPI:-300}
       DOCLING_EXTRACT_THRESHOLD: ${DOCLING_EXTRACT_THRESHOLD:-0.90}
       DOCLING_LAYOUT_THRESHOLD: ${DOCLING_LAYOUT_THRESHOLD:-0.60}
+      # VLM lane (Claude vision) — key comes from .env (gitignored); empty = lane disabled.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      DOCLING_VLM_MODEL: ${DOCLING_VLM_MODEL:-claude-sonnet-5}
+      DOCLING_VLM_ESCALATION_MODEL: ${DOCLING_VLM_ESCALATION_MODEL:-claude-opus-4-8}
+      DOCLING_VLM_DPI: ${DOCLING_VLM_DPI:-200}
+      DOCLING_VLM_PAGE_WORKERS: ${DOCLING_VLM_PAGE_WORKERS:-4}
+      DOCLING_WARMUP_LANGS: ${DOCLING_WARMUP_LANGS:-en}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       # Concurrency. Keep 1 on a small/CPU box; raise only with more RAM.
       DOCLING_WORKERS: ${DOCLING_WORKERS:-1}

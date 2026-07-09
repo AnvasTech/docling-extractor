@@ -22,7 +22,7 @@ def ocr_engines(analysis: DocumentAnalysis) -> list[str]:
 
 def _forced(engine: str, analysis: DocumentAnalysis) -> list[str] | None:
     # Legacy /jobs `engine` values map onto the new registry.
-    if engine in ("pymupdf", "docling", "easyocr", "tesseract"):
+    if engine in ("pymupdf", "docling", "easyocr", "tesseract", "vlm"):
         return [engine]
     if engine in ("ocr", "paddle", "rapidocr"):
         return ocr_engines(analysis)
@@ -49,19 +49,22 @@ def select(
         return ["pymupdf", ocr[0]]
 
     if mode is ExtractionMode.LEGAL:
-        return ["pymupdf", *ocr, "docling"]
+        return ["pymupdf", *ocr, "vlm", "docling"]
 
     # AUTO — choose by document class.
     cls = analysis.document_class
     if cls is DocumentClass.HANDWRITTEN:
-        # No local engine reads handwriting well; run both OCR engines and
-        # keep the best. (VLM fallback slots in here when configured.)
-        return ocr
+        # No local engine reads Indic handwriting — the VLM leads when
+        # configured; both OCR engines remain as offline fallbacks.
+        return ["vlm", *ocr]
     if cls in (DocumentClass.TABLE_HEAVY, DocumentClass.LAYOUT_HEAVY):
         return ["pymupdf", "docling"]
     if cls is DocumentClass.SCANNED:
-        return [*ocr, "docling"]
+        # Docling dropped here: its internal OCR is Tesseract again, so it
+        # adds minutes for zero accuracy after both OCR engines have run.
+        # Low-confidence scans escalate to the VLM instead.
+        return [*ocr, "vlm"]
     if cls is DocumentClass.MIXED:
-        return ["pymupdf", *ocr, "docling"]
+        return ["pymupdf", *ocr, "vlm"]
     # DIGITAL_TEXT / LEGAL_DOCUMENT
     return ["pymupdf", ocr[0]]

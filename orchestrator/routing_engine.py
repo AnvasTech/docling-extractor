@@ -37,9 +37,12 @@ def decide(
         reasons.append("mixed_language→docling_fallback")
 
     # Scanned non-English must lead with the language-appropriate OCR engine.
-    if analysis.is_scanned and analysis.primary_language not in (
-        Language.ENGLISH,
-        Language.UNKNOWN,
+    # Handwritten documents keep their VLM lead — reordering an OCR engine in
+    # front of it would put an engine that can't read handwriting first.
+    if (
+        analysis.is_scanned
+        and not analysis.handwritten
+        and analysis.primary_language not in (Language.ENGLISH, Language.UNKNOWN)
     ):
         lead = strategy_selector.ocr_engines(analysis)[0]
         if cascade and cascade[0] != lead and not force_engine:

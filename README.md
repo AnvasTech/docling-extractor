@@ -6,7 +6,8 @@ cheapest engine that can hit acceptable quality, escalates only when needed, and
 returns one normalized JSON — the caller never knows which engine ran.
 
 Engines: **PyMuPDF** (text layer) · **EasyOCR** (scanned — ta/te/kn/bn/hi/mr/en) ·
-**Tesseract** (scanned — ml/gu + fallback for all scripts) · **Docling**
+**Tesseract** (scanned — ml/gu + fallback for all scripts) · **VLM / Claude vision**
+(handwriting + low-confidence scans; needs `ANTHROPIC_API_KEY`) · **Docling**
 (complex layout/tables, language-aware OCR) · **OpenDataLoader-PDF** (RAG, optional).
 
 Supported languages: English, Tamil, Hindi, Malayalam, Telugu, Kannada,
@@ -45,9 +46,9 @@ GET  /metrics     → request counts, avg latency, by-method
 ## Modes
 | Mode | Pipeline | Use |
 |------|----------|-----|
-| `auto` | class-driven | default; digital→PyMuPDF, scanned→EasyOCR/Tesseract (by language), handwritten→both OCR engines, tables/layout→Docling |
+| `auto` | class-driven | default; digital→PyMuPDF, scanned→EasyOCR/Tesseract (by language)→VLM, handwritten→VLM first, tables/layout→Docling |
 | `fast` | PyMuPDF → best OCR | bulk ingestion / indexing |
-| `legal` | PyMuPDF → EasyOCR → Tesseract → Docling | title verification (reading order + tables matter) |
+| `legal` | PyMuPDF → EasyOCR → Tesseract → VLM → Docling | title verification (reading order + tables matter) |
 | `rag` | OpenDataLoader-PDF → Docling | RAG-ready markdown + chunks (only on request) |
 
 Escalation is confidence-gated: an engine's output is scored on density
@@ -78,10 +79,20 @@ See [MIGRATION.md](./MIGRATION.md) for the module map, flow, and migration plan.
 
 ## Config (env)
 `DOCLING_SERVICE_TOKEN`, `DOCLING_DEFAULT_MODE` (auto), `DOCLING_WORKERS` (1),
-`DOCLING_OCR_DPI` (200), `DOCLING_EXTRACT_THRESHOLD` (0.90),
+`DOCLING_OCR_DPI` (300), `DOCLING_EXTRACT_THRESHOLD` (0.90),
 `DOCLING_LAYOUT_THRESHOLD` (0.60), `DOCLING_HANDWRITING_CONF` (0.40),
-`DOCLING_EASYOCR_GPU` (0), `DOCLING_OCR_PAGE_WORKERS` (4),
-`DOCLING_MAX_BYTES` (200 MB), `DOCLING_JOB_TTL` (1800), `LOG_LEVEL` (INFO).
+`DOCLING_EASYOCR_GPU` (0 — set 1 on a GPU host, ~10–20× OCR speedup),
+`DOCLING_OCR_PAGE_WORKERS` (4), `DOCLING_WARMUP_LANGS` (en — EasyOCR readers
+preloaded at startup, e.g. `ta,en`), `DOCLING_MAX_BYTES` (200 MB),
+`DOCLING_JOB_TTL` (1800), `LOG_LEVEL` (INFO).
+
+VLM lane: `ANTHROPIC_API_KEY` (unset → lane disabled, cascades skip it),
+`DOCLING_VLM_MODEL` (claude-sonnet-5), `DOCLING_VLM_ESCALATION_MODEL`
+(claude-opus-4-8 — retries pages the primary model can't read),
+`DOCLING_VLM_DPI` (200), `DOCLING_VLM_PAGE_WORKERS` (4). Scoring is
+language-aware: per-script chars/page norms + the engine's own OCR word
+confidence drive escalation, so good Indic output is accepted instead of
+being re-run through slower engines.
 
 ## Run / deploy
 ```bash

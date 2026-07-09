@@ -9,6 +9,9 @@ pages are routed by the classifier's per-page language.
 
 from __future__ import annotations
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
 from core.config import settings
 from core.languages import EASYOCR_CODES, document_languages
 from schemas.document_schema import DocumentAnalysis, Language
@@ -16,15 +19,18 @@ from schemas.extraction_result import PageResult
 from .base import Extractor, ExtractorOutput
 
 _readers: dict[tuple[str, ...], object] = {}
+_readers_lock = threading.Lock()
 
 
 def _reader(codes: tuple[str, ...]):
     if codes not in _readers:
-        import easyocr
+        with _readers_lock:
+            if codes not in _readers:
+                import easyocr
 
-        _readers[codes] = easyocr.Reader(
-            list(codes), gpu=settings.easyocr_gpu, verbose=False
-        )
+                _readers[codes] = easyocr.Reader(
+                    list(codes), gpu=settings.easyocr_gpu, verbose=False
+                )
     return _readers[codes]
 
 
@@ -35,8 +41,8 @@ def _codes_for(lang: Language) -> tuple[str, ...]:
     return (code, "en")
 
 
-def _ocr_page(pix, codes: tuple[str, ...]) -> tuple[str, float]:
-    result = _reader(codes).readtext(pix.tobytes("png"))
+def _ocr_page(png_bytes: bytes, codes: tuple[str, ...]) -> tuple[str, float]:
+    result = _reader(codes).readtext(png_bytes)
     if not result:
         return "", 0.0
     lines = [entry[1] for entry in result if len(entry) >= 2 and entry[1]]
@@ -64,32 +70,44 @@ class EasyOCRExtractor(Extractor):
         import fitz
 
         primary = analysis.primary_language
+
+        # Render serially (fitz documents are not thread-safe), OCR in a pool.
+        # Recognition releases the GIL inside PyTorch, so pages overlap.
+        jobs: list[tuple[Language, bytes]] = []
         doc = fitz.open(path)
-        pages: list[PageResult] = []
-        parts: list[str] = []
-        confs: list[float] = []
         try:
             for i in range(doc.page_count):
                 page_lang = analysis.page_languages.get(i, primary)
                 if page_lang not in EASYOCR_CODES:
                     page_lang = primary if primary in EASYOCR_CODES else Language.ENGLISH
                 pix = doc.load_page(i).get_pixmap(dpi=settings.ocr_dpi)
-                text, conf = _ocr_page(pix, _codes_for(page_lang))
-                parts.append(text)
-                confs.append(conf)
-                pages.append(
-                    PageResult(
-                        index=i,
-                        text=text,
-                        chars=len(text),
-                        language=page_lang,
-                        extraction_method=self.name,
-                        ocr_confidence=round(conf, 3),
-                    )
-                )
+                jobs.append((page_lang, pix.tobytes("png")))
             page_count = doc.page_count
         finally:
             doc.close()
+
+        workers = max(1, settings.ocr_page_workers)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            results = list(
+                pool.map(lambda job: _ocr_page(job[1], _codes_for(job[0])), jobs)
+            )
+
+        pages: list[PageResult] = []
+        parts: list[str] = []
+        confs: list[float] = []
+        for i, (text, conf) in enumerate(results):
+            parts.append(text)
+            confs.append(conf)
+            pages.append(
+                PageResult(
+                    index=i,
+                    text=text,
+                    chars=len(text),
+                    language=jobs[i][0],
+                    extraction_method=self.name,
+                    ocr_confidence=round(conf, 3),
+                )
+            )
 
         avg_conf = sum(confs) / len(confs) if confs else 0.0
         return ExtractorOutput(

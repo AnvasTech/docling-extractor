@@ -14,6 +14,7 @@ from extractors.easyocr_extractor import EasyOCRExtractor
 from extractors.opendataloader_extractor import OpenDataLoaderExtractor
 from extractors.pymupdf_extractor import PyMuPDFExtractor
 from extractors.tesseract_extractor import TesseractExtractor
+from extractors.vlm_extractor import VLMExtractor
 from schemas.document_schema import DocumentAnalysis, ExtractionMode
 from schemas.extraction_result import ExtractionResult
 from . import routing_engine
@@ -27,9 +28,10 @@ _REGISTRY: dict[str, Extractor] = {
     "tesseract": TesseractExtractor(),
     "docling": DoclingExtractor(),
     "opendataloader": OpenDataLoaderExtractor(),
+    "vlm": VLMExtractor(),
 }
 
-_OCR_ENGINES = ("easyocr", "tesseract", "docling")
+_OCR_ENGINES = ("easyocr", "tesseract", "docling", "vlm")
 
 
 def analyze(path: str) -> DocumentAnalysis:
@@ -85,7 +87,11 @@ def extract(
             log(logger, logging.WARNING, "engine_failed", engine=name, error=str(exc))
             continue
 
-        conf = quality_analyzer.text_confidence(out.text, analysis)
+        conf = quality_analyzer.text_confidence(
+            out.text,
+            analysis,
+            ocr_confidence=out.ocr_confidence if name in _OCR_ENGINES else None,
+        )
         if conf > best_conf:
             best, best_conf = out, conf
 

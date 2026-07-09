@@ -23,7 +23,9 @@ def test_scanned_auto_uses_ocr_first():
     a = _analysis(document_class=DocumentClass.SCANNED, is_digital=False, is_scanned=True)
     cascade = strategy_selector.select(a, ExtractionMode.AUTO)
     assert cascade[0] in ("easyocr", "tesseract")
-    assert cascade[-1] == "docling"
+    # Docling's OCR is Tesseract again — scans escalate to the VLM instead.
+    assert cascade[-1] == "vlm"
+    assert "docling" not in cascade
 
 
 def test_scanned_tamil_leads_with_easyocr():
@@ -61,7 +63,7 @@ def test_scanned_gujarati_leads_with_tesseract():
     assert cascade[0] == "tesseract"
 
 
-def test_handwritten_runs_both_ocr_engines():
+def test_handwritten_leads_with_vlm():
     a = _analysis(
         document_class=DocumentClass.HANDWRITTEN,
         is_digital=False,
@@ -70,7 +72,22 @@ def test_handwritten_runs_both_ocr_engines():
         primary_language=Language.TAMIL,
     )
     cascade = strategy_selector.select(a, ExtractionMode.AUTO)
-    assert set(cascade) == {"easyocr", "tesseract"}
+    assert cascade[0] == "vlm"
+    assert set(cascade) == {"vlm", "easyocr", "tesseract"}
+
+
+def test_handwritten_routing_keeps_vlm_lead():
+    # The scanned-non-English reorder must not push an OCR engine in front of
+    # the VLM for handwritten documents.
+    a = _analysis(
+        document_class=DocumentClass.HANDWRITTEN,
+        is_digital=False,
+        is_scanned=True,
+        handwritten=True,
+        primary_language=Language.TAMIL,
+    )
+    plan = routing_engine.decide(a, ExtractionMode.AUTO)
+    assert plan.cascade[0] == "vlm"
 
 
 def test_rag_uses_opendataloader():
@@ -80,7 +97,11 @@ def test_rag_uses_opendataloader():
 
 def test_legal_full_cascade():
     cascade = strategy_selector.select(_analysis(), ExtractionMode.LEGAL)
-    assert cascade == ["pymupdf", "easyocr", "tesseract", "docling"]
+    assert cascade == ["pymupdf", "easyocr", "tesseract", "vlm", "docling"]
+
+
+def test_forced_vlm():
+    assert strategy_selector.select(_analysis(), ExtractionMode.AUTO, "vlm") == ["vlm"]
 
 
 def test_forced_engine_overrides():
