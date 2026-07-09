@@ -2,6 +2,9 @@
 
   POST /extract   — stateless flow: {file_url, mode} (signed Supabase URL) OR a
                     multipart file. Downloads, extracts, returns JSON, deletes.
+  POST /analyze   — classification only (multipart file): document class,
+                    languages, page count. Fast — no full extraction. Lets the
+                    client show type/language/pages before extraction starts.
   POST /jobs      — backward-compatible async queue (multipart file + engine).
   GET  /jobs/{id} — poll an async job.
 """
@@ -15,9 +18,9 @@ from pydantic import BaseModel
 
 from core.config import settings
 from integrations import supabase_client
+from orchestrator.extraction_manager import analyze as run_analyze
 from orchestrator.extraction_manager import extract as run_extract
 from schemas.document_schema import ExtractionMode
-from schemas.extraction_result import ExtractionResult
 from services import job_queue
 from services.metrics_service import metrics
 from services.temp_file_manager import materialize, temp_path
@@ -37,7 +40,7 @@ def _mode(value: str | None) -> ExtractionMode:
         return ExtractionMode.AUTO
 
 
-async def _run_blocking(fn) -> ExtractionResult:
+async def _run_blocking(fn):
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, fn)
 
@@ -102,6 +105,36 @@ async def extract(
         )
     metrics.record(result.method, result.processing_time_ms, result.ok)
     return result.model_dump()
+
+
+@router.post("/analyze")
+async def analyze_document(
+    file: UploadFile = File(...),
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Classify a document without extracting it (type, languages, pages)."""
+    _auth(authorization)
+    data = await file.read()
+    if len(data) > settings.max_bytes:
+        raise HTTPException(status_code=413, detail="File too large")
+    with materialize(data, _suffix(file.filename or "")) as path:
+        try:
+            analysis = await _run_blocking(lambda: run_analyze(path))
+        except Exception as exc:  # noqa: BLE001 - unreadable/corrupt file
+            raise HTTPException(status_code=422, detail=f"Could not analyze file: {exc}")
+    return {
+        "ok": True,
+        "page_count": analysis.page_count,
+        "document_class": analysis.document_class.value,
+        "primary_language": analysis.primary_language.value,
+        "secondary_languages": [l.value for l in analysis.secondary_languages],
+        "mixed_language": analysis.mixed_language,
+        "handwritten": analysis.handwritten,
+        "has_tables": analysis.has_tables,
+        "layout_complex": analysis.layout_complex,
+        "ocr_required": analysis.ocr_required,
+        "digital_text_ratio": analysis.digital_text_ratio,
+    }
 
 
 @router.post("/jobs")
