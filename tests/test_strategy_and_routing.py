@@ -28,12 +28,26 @@ def test_scanned_auto_uses_ocr_first():
     assert "docling" not in cascade
 
 
-def test_scanned_tamil_leads_with_easyocr():
+def test_scanned_tamil_leads_with_tesseract():
+    # EasyOCR's Tamil model is broken upstream — Tesseract must lead, with
+    # the VLM as the low-confidence escalation.
     a = _analysis(
         document_class=DocumentClass.SCANNED,
         is_digital=False,
         is_scanned=True,
         primary_language=Language.TAMIL,
+    )
+    cascade = strategy_selector.select(a, ExtractionMode.AUTO)
+    assert cascade[0] == "tesseract"
+    assert "vlm" in cascade
+
+
+def test_scanned_telugu_leads_with_easyocr():
+    a = _analysis(
+        document_class=DocumentClass.SCANNED,
+        is_digital=False,
+        is_scanned=True,
+        primary_language=Language.TELUGU,
     )
     cascade = strategy_selector.select(a, ExtractionMode.AUTO)
     assert cascade[0] == "easyocr"
@@ -111,8 +125,10 @@ def test_forced_engine_overrides():
 def test_legacy_forced_ocr_maps_to_language_engines():
     a = _analysis(primary_language=Language.MALAYALAM)
     assert strategy_selector.select(a, ExtractionMode.AUTO, "rapidocr")[0] == "tesseract"
-    b = _analysis(primary_language=Language.TAMIL)
+    b = _analysis(primary_language=Language.TELUGU)
     assert strategy_selector.select(b, ExtractionMode.AUTO, "ocr")[0] == "easyocr"
+    c = _analysis(primary_language=Language.TAMIL)
+    assert strategy_selector.select(c, ExtractionMode.AUTO, "ocr")[0] == "tesseract"
 
 
 def test_routing_scanned_tamil_puts_ocr_first():
@@ -123,6 +139,6 @@ def test_routing_scanned_tamil_puts_ocr_first():
         primary_language=Language.TAMIL,
     )
     plan = routing_engine.decide(a, ExtractionMode.AUTO)
-    assert plan.cascade[0] == "easyocr"
+    assert plan.cascade[0] == "tesseract"
     assert "ocr_first" in plan.rationale
     assert "lang=ta" in plan.rationale

@@ -1,8 +1,14 @@
 """Language ↔ OCR-engine code mappings, shared by analyzers and extractors.
 
 Engine coverage for the supported Indic set:
-  EasyOCR   — ta, te, kn, bn, hi, mr, en (best open-source accuracy for these)
-  Tesseract — all of the above plus ml, gu (the only local engine for those two)
+  EasyOCR   — te, kn, bn, hi, mr, en (best open-source accuracy for these)
+  Tesseract — all of the above plus ta, ml, gu
+  VLM       — escalation lane for everything, and the handwriting lane
+
+Tamil is NOT in the EasyOCR set: the upstream tamil.pth release asset was
+replaced with a 143-class model while every easyocr release still ships a
+127-class charset, so the reader fails to load (state_dict size mismatch).
+Tamil scans lead with Tesseract and escalate to the VLM.
 """
 
 from __future__ import annotations
@@ -22,11 +28,11 @@ TESSERACT_CODES: dict[Language, str] = {
     Language.MARATHI: "mar",
 }
 
-# Language → EasyOCR reader code. Malayalam and Gujarati are NOT supported by
-# EasyOCR — those route to Tesseract.
+# Language → EasyOCR reader code. Malayalam and Gujarati have no EasyOCR
+# models; Tamil's upstream model is broken (see module docstring). All three
+# route to Tesseract (+ VLM escalation).
 EASYOCR_CODES: dict[Language, str] = {
     Language.ENGLISH: "en",
-    Language.TAMIL: "ta",
     Language.TELUGU: "te",
     Language.KANNADA: "kn",
     Language.BENGALI: "bn",

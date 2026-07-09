@@ -40,9 +40,12 @@ RUN pip install --no-cache-dir -r requirements-rag.txt || \
 # Bake Docling layout/table models into the image (no runtime download).
 RUN docling-tools models download
 
-# Bake EasyOCR detection + per-language recognition models (ta/te/kn/bn/hi
-# each ship their own recognition model; en rides along in every reader).
-RUN python -c "import easyocr; [easyocr.Reader([l, 'en'], gpu=False, verbose=False) for l in ('ta', 'te', 'kn', 'bn', 'hi')]"
+# Bake EasyOCR detection + per-language recognition models (te/kn/bn/hi each
+# ship their own recognition model; en rides along in every reader). Tamil is
+# deliberately absent: the upstream tamil.pth asset was replaced with a
+# 143-class model that no easyocr release can load — Tamil routes to
+# Tesseract + the VLM lane instead (see core/languages.py).
+RUN python -c "import easyocr; [easyocr.Reader([l, 'en'], gpu=False, verbose=False) for l in ('te', 'kn', 'bn', 'hi')]"
 
 COPY . .
 

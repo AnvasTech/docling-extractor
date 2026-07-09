@@ -5,8 +5,9 @@ Property Title Verification platform. It analyses each document, picks the
 cheapest engine that can hit acceptable quality, escalates only when needed, and
 returns one normalized JSON — the caller never knows which engine ran.
 
-Engines: **PyMuPDF** (text layer) · **EasyOCR** (scanned — ta/te/kn/bn/hi/mr/en) ·
-**Tesseract** (scanned — ml/gu + fallback for all scripts) · **VLM / Claude vision**
+Engines: **PyMuPDF** (text layer) · **EasyOCR** (scanned — te/kn/bn/hi/mr/en) ·
+**Tesseract** (scanned — ta/ml/gu + fallback for all scripts; Tamil because the
+upstream EasyOCR Tamil model is broken) · **VLM / Claude vision**
 (handwriting + low-confidence scans; needs `ANTHROPIC_API_KEY`) · **Docling**
 (complex layout/tables, language-aware OCR) · **OpenDataLoader-PDF** (RAG, optional).
 

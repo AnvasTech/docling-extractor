@@ -1,10 +1,11 @@
 """EasyOCR — primary OCR engine for scanned Indic + English documents.
 
-Covers ta, te, kn, bn, hi, mr, en (Malayalam and Gujarati are not supported
-by EasyOCR — the Tesseract extractor handles those). Readers are cached per
-language pair: an EasyOCR reader can only combine languages that share a
-recognition model, so each Indic language gets its own (lang, en) reader and
-pages are routed by the classifier's per-page language.
+Covers te, kn, bn, hi, mr, en. Tamil, Malayalam and Gujarati route to
+Tesseract instead (ml/gu have no EasyOCR models; the upstream Tamil model is
+broken — see core/languages.py). Readers are cached per language pair: an
+EasyOCR reader can only combine languages that share a recognition model, so
+each Indic language gets its own (lang, en) reader and pages are routed by
+the classifier's per-page language.
 """
 
 from __future__ import annotations
