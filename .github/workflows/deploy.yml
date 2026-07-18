@@ -1,10 +1,13 @@
-name: Deploy docling-extractor (self-hosted)
+name: Deploy docling-extractor
 
-# Push to main -> the self-hosted runner on the Vultr server rebuilds the
-# docling container via the shared /opt/deploy compose stack. Internal-only:
-# no host port, no Caddy route, no DNS. Callers (getlegal) reach it privately
-# at http://docling:8000 on the compose 'web' network, guarded by
-# DOCLING_SERVICE_TOKEN. First-time setup (clone) is manual — see DEPLOY notes.
+# Push to main -> SSH into the ADIP server (139.84.131.160) and rebuild the
+# docling container from its own compose file at /opt/docling-extractor.
+# The service is exposed on host port 8000, guarded by DOCLING_SERVICE_TOKEN
+# (set in /opt/docling-extractor/.env on the server). Callers (getlegal on the
+# old server) reach it at http://<DEPLOY_HOST>:8000.
+#
+# Migrated off the old shared /opt/deploy stack + self-hosted runner on
+# 139.84.209.18 — this now matches the ADIP deploy pattern (appleboy/ssh-action).
 
 on:
   push:
@@ -17,15 +20,29 @@ concurrency:
 
 jobs:
   deploy:
-    runs-on: [self-hosted, anvas]   # same label as getlegal / anvaslogistics
+    runs-on: ubuntu-latest
     steps:
-      - name: Pull latest, rebuild container
-        run: |
-          set -euo pipefail
-          cd /opt/docling-extractor
-          git fetch origin main
-          git reset --hard origin/main
-          cd /opt/deploy
-          docker compose up -d --build docling
-          docker image prune -f
-          echo "Deployed $(cd /opt/docling-extractor && git rev-parse --short HEAD)"
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: root
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          command_timeout: 30m
+          script: |
+            set -euo pipefail
+            cd /opt/docling-extractor
+            git fetch origin main
+            git reset --hard origin/main
+            docker compose --env-file .env up -d --build
+            docker image prune -f
+            for i in $(seq 1 30); do
+              if curl -sf -m 5 http://127.0.0.1:8000/health >/dev/null; then
+                echo "Healthy at $(git rev-parse --short HEAD)"
+                exit 0
+              fi
+              sleep 2
+            done
+            echo "!! docling failed health check after deploy" >&2
+            docker logs --tail 50 docling-extractor >&2
+            exit 1
