@@ -5,7 +5,8 @@ services:
     container_name: docling-extractor
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      # DOCLING_BIND=127.0.0.1 restricts the service to localhost (Caddy-only access).
+      - "${DOCLING_BIND:-0.0.0.0}:8000:8000"
     environment:
       # Shared secret — must match DOCLING_SERVICE_TOKEN in each caller app's env.
       DOCLING_SERVICE_TOKEN: ${DOCLING_SERVICE_TOKEN:-}
